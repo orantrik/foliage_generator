@@ -79,16 +79,59 @@ TRACE_HEIGHT_OFFSET = 5000   # cm above top of actor to start line traces
 #  READ CONFIG FROM RUNNING WIDGET
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _scan_project_foliage_types():
+    """Return all FoliageType_InstancedStaticMesh assets found in the project."""
+    asset_registry = unreal.AssetRegistryHelpers.get_asset_registry()
+    asset_registry.search_all_assets(True)
+    ft_assets = asset_registry.get_assets_by_class(
+        unreal.TopLevelAssetPath("/Script/Foliage", "FoliageType_InstancedStaticMesh")
+    )
+    result = []
+    for ft in ft_assets:
+        pkg  = str(ft.package_path)
+        name = str(ft.asset_name)
+        result.append(f"{pkg}/{name}")
+    return result
+
+
+def _parse_foliage_config(text):
+    """
+    Parse the FoliageConfig text box.
+    Each non-empty line: /Game/Foliage/FT_Tree  MEDIUM_TREE
+    Returns list of (asset_path, category) tuples.
+    Skips lines starting with #.
+    """
+    valid_cats = set(CATEGORY_RULES.keys())
+    foliage_types = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) < 1:
+            continue
+        asset_path = parts[0]
+        category   = parts[1].upper() if len(parts) >= 2 else "MEDIUM_TREE"
+        if category not in valid_cats:
+            category = "MEDIUM_TREE"
+        foliage_types.append((asset_path, category))
+    return foliage_types
+
+
 def _read_widget_config():
     """
     Connect to the running EUW_FoliageGenerator widget and read:
-      - material path from MaterialPathInput
-      - seed from SeedInput
-      - enabled foliage types + categories from each foliage row
-    Returns a dict, or None if the widget is not open.
+      - MaterialPathInput → material path
+      - SeedInput         → random seed
+      - FoliageConfig     → foliage asset paths + categories (one per line)
+
+    If FoliageConfig is empty, auto-generates a starter config from all
+    project FoliageType assets and writes it to both StatusLog and FoliageConfig.
+
+    Returns a config dict, or None if the widget is not open.
     """
     try:
-        subsystem = unreal.get_editor_subsystem(unreal.EditorUtilitySubsystem)
+        subsystem    = unreal.get_editor_subsystem(unreal.EditorUtilitySubsystem)
         widget_asset = unreal.load_object(None, WIDGET_ASSET_PATH)
         if widget_asset is None:
             return None
@@ -98,11 +141,15 @@ def _read_widget_config():
             return None
 
         # ── Material path ─────────────────────────────────────────────────
-        mat_input = widget.get_widget_from_name("MaterialPathInput")
-        material_path = str(mat_input.get_text()) if mat_input else ""
-        material_path = material_path.strip()
+        mat_input     = widget.get_widget_from_name("MaterialPathInput")
+        material_path = str(mat_input.get_text()).strip() if mat_input else ""
         if not material_path:
-            print("[Foliage] ⚠  Material path is empty — set it in the widget.")
+            _set_widget_status(
+                "⚠  Material path is empty.\n\n"
+                "Select a surface in the viewport → click ↗ Pick Material,\n"
+                "or paste a /Game/... path into the material field."
+            )
+            print("[Foliage] ⚠  Material path is empty.")
             return None
 
         # ── Seed ──────────────────────────────────────────────────────────
@@ -114,29 +161,41 @@ def _read_widget_config():
             except ValueError:
                 pass
 
-        # ── Foliage types — scan every row in the widget ──────────────────
-        asset_registry = unreal.AssetRegistryHelpers.get_asset_registry()
-        ft_assets = asset_registry.get_assets_by_class(
-            unreal.TopLevelAssetPath("/Script/Foliage", "FoliageType_InstancedStaticMesh")
-        )
+        # ── Foliage config ────────────────────────────────────────────────
+        cfg_box      = widget.get_widget_from_name("FoliageConfig")
+        cfg_text     = str(cfg_box.get_text()).strip() if cfg_box else ""
+        foliage_types = _parse_foliage_config(cfg_text)
 
-        foliage_types = []
-        for ft in ft_assets:
-            asset_name = str(ft.asset_name)
-            safe_name  = asset_name.replace(".", "_").replace("/", "_").replace(" ", "_")
+        if not foliage_types:
+            # First run — auto-generate config from project assets
+            project_paths = _scan_project_foliage_types()
+            if not project_paths:
+                msg = (
+                    "⚠  No FoliageType assets found in the project.\n\n"
+                    "Open the Foliage Tool (Shift+4), add some foliage types\n"
+                    "to the level, then click Generate again."
+                )
+                _set_widget_status(msg)
+                print(f"[Foliage] {msg}")
+                return None
 
-            cb  = widget.get_widget_from_name(f"CB_{safe_name}")
-            cat = widget.get_widget_from_name(f"CAT_{safe_name}")
-
-            if cb is None or not cb.get_is_checked():
-                continue
-
-            category = cat.get_selected_option() if cat else "MEDIUM_TREE"
-            # Build loadable asset path:  /PackagePath/AssetName
-            pkg  = str(ft.package_path)
-            name = str(ft.asset_name)
-            asset_path = f"{pkg}/{name}"
-            foliage_types.append((asset_path, category))
+            starter = "\n".join(
+                f"{p}  MEDIUM_TREE" for p in project_paths
+            )
+            help_msg = (
+                "FoliageConfig was empty — auto-filled with all\n"
+                "FoliageType assets found in this project.\n\n"
+                "Edit the category on each line if needed:\n"
+                "  LARGE_TREE  MEDIUM_TREE  SMALL_TREE  SHRUB\n\n"
+                "Then click ▶ Generate Foliage again.\n\n"
+                "─── Copy this into the FoliageConfig box ───\n"
+                + starter
+            )
+            _set_widget_status(help_msg)
+            if cfg_box:
+                cfg_box.set_text(unreal.Text.cast(starter))
+            print("[Foliage] FoliageConfig auto-filled. Review categories and generate again.")
+            return None
 
         return {
             "material_path": material_path,
