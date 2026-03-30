@@ -40,6 +40,11 @@ FULL_ASSET_PATH = f"{WIDGET_CONTENT_PATH}/{WIDGET_ASSET_NAME}"
 print("\n[Setup] Creating EUW_FoliageGenerator...")
 
 if unreal.EditorAssetLibrary.does_asset_exist(FULL_ASSET_PATH):
+    # Close any open editor tabs for this asset before deleting,
+    # otherwise UE crashes with an access violation.
+    existing = unreal.load_object(None, FULL_ASSET_PATH)
+    if existing:
+        unreal.get_editor_subsystem(unreal.AssetEditorSubsystem).close_all_editors_for_asset(existing)
     unreal.EditorAssetLibrary.delete_asset(FULL_ASSET_PATH)
     print("[Setup] Deleted previous version.")
 
@@ -58,7 +63,7 @@ if widget_bp is None:
 unreal.EditorAssetLibrary.save_asset(widget_bp.get_path_name())
 
 # Open the widget in the editor so the user can start building right away
-unreal.AssetEditorSubsystem().open_editor_for_assets([widget_bp])
+unreal.get_editor_subsystem(unreal.AssetEditorSubsystem).open_editor_for_assets([widget_bp])
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  PRINT SETUP INSTRUCTIONS
