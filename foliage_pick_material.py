@@ -115,8 +115,10 @@ def pick_material_from_selection():
 
     # 4. Write into widget — with clipboard fallback
     subsystem    = unreal.get_editor_subsystem(unreal.EditorUtilitySubsystem)
-    widget_asset = unreal.load_object(None, WIDGET_ASSET_PATH)
-    widget       = subsystem.find_utility_widget_from_blueprint(widget_asset) if widget_asset else None
+    widget_asset = unreal.find_object(None, WIDGET_ASSET_PATH)
+    if not widget_asset:
+        widget_asset = unreal.load_object(None, WIDGET_ASSET_PATH + "." + WIDGET_ASSET_PATH.split("/")[-1])
+    widget = subsystem.find_utility_widget_from_blueprint(widget_asset) if widget_asset else None
 
     wrote_to_widget = False
     if widget:

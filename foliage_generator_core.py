@@ -152,16 +152,27 @@ def _read_widget_config():
     If FoliageConfig is empty, auto-generates a starter config from all
     project FoliageType assets and writes it to both StatusLog and FoliageConfig.
 
-    Returns a config dict, or None if the widget is not open.
+    Returns a config dict, or None if the widget is not running.
     """
     try:
-        subsystem    = unreal.get_editor_subsystem(unreal.EditorUtilitySubsystem)
-        widget_asset = unreal.load_object(None, WIDGET_ASSET_PATH)
+        subsystem = unreal.get_editor_subsystem(unreal.EditorUtilitySubsystem)
+
+        # Use find_object (no side effects) — load_object would open the asset editor
+        widget_asset = unreal.find_object(None, WIDGET_ASSET_PATH)
         if widget_asset is None:
+            # Asset not in memory at all — try loading it properly
+            widget_asset = unreal.load_object(None, WIDGET_ASSET_PATH + "." + WIDGET_ASSET_PATH.split("/")[-1])
+
+        if widget_asset is None:
+            print("[Foliage] ⚠  Widget asset not found at: " + WIDGET_ASSET_PATH)
             return None
 
         widget = subsystem.find_utility_widget_from_blueprint(widget_asset)
         if widget is None:
+            print("[Foliage] ⚠  Widget is not running.")
+            print("          → Right-click EUW_FoliageGenerator in the Content Browser")
+            print("          → Run Editor Utility Widget")
+            print("          → Then click  ▶ Generate Foliage  from inside the widget.")
             return None
 
         # ── Material path ─────────────────────────────────────────────────
@@ -334,14 +345,16 @@ def _build_transform(location, normal, scale_range, align_normal, rng):
 def _set_widget_status(message):
     """Write message to the widget's StatusLog text box if it's open."""
     try:
-        subsystem = unreal.get_editor_subsystem(unreal.EditorUtilitySubsystem)
-        widget_asset = unreal.load_object(None, WIDGET_ASSET_PATH)
+        subsystem    = unreal.get_editor_subsystem(unreal.EditorUtilitySubsystem)
+        widget_asset = unreal.find_object(None, WIDGET_ASSET_PATH)
+        if not widget_asset:
+            widget_asset = unreal.load_object(None, WIDGET_ASSET_PATH + "." + WIDGET_ASSET_PATH.split("/")[-1])
         if not widget_asset:
             return
         widget = subsystem.find_utility_widget_from_blueprint(widget_asset)
         if not widget:
             return
-        log = _get_widget(widget,"StatusLog")
+        log = _get_widget(widget, "StatusLog")
         if log:
             log.set_text(unreal.Text.cast(message))
     except Exception:
