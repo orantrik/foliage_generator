@@ -76,6 +76,7 @@ CATEGORY_RULES = {
 }
 
 TRACE_HEIGHT_OFFSET = 5000   # cm above top of actor to start line traces
+MAX_POINTS_PER_ACTOR = 500   # hard cap on line traces per actor — raise carefully
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  WIDGET CHILD ACCESS HELPER
@@ -108,7 +109,7 @@ def _get_widget(parent, name):
 def _scan_project_foliage_types():
     """Return all FoliageType_InstancedStaticMesh assets found in the project."""
     asset_registry = unreal.AssetRegistryHelpers.get_asset_registry()
-    asset_registry.search_all_assets(True)
+    # Do NOT call search_all_assets(True) — it synchronously loads every asset
     ft_assets = asset_registry.get_assets_by_class(
         unreal.TopLevelAssetPath("/Script/Foliage", "FoliageType_InstancedStaticMesh")
     )
@@ -293,11 +294,21 @@ def _find_matching_actors(world, target_material_path):
 
 
 def _generate_candidate_points(origin, extent, spacing, jitter_frac, rng):
-    """Uniform grid with seeded random jitter within actor bounding box."""
+    """
+    Uniform grid with seeded random jitter within actor bounding box.
+    Capped at MAX_POINTS_PER_ACTOR to avoid freezing the editor.
+    """
     x_min = origin.x - extent.x
     x_max = origin.x + extent.x
     y_min = origin.y - extent.y
     y_max = origin.y + extent.y
+
+    # Estimate grid count; widen spacing if it would exceed the cap
+    cols = max(1, int((x_max - x_min) / spacing))
+    rows = max(1, int((y_max - y_min) / spacing))
+    if cols * rows > MAX_POINTS_PER_ACTOR:
+        scale = math.sqrt(cols * rows / MAX_POINTS_PER_ACTOR)
+        spacing = spacing * scale
 
     jitter_range = spacing * jitter_frac
     points = []
