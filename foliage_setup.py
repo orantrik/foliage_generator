@@ -102,14 +102,11 @@ print(f"[Setup] Widget blueprint created.")
 #  STEP 3 — Build widget tree
 # ══════════════════════════════════════════════════════════════════════════════
 
-# EditorUtilityWidgetBlueprint inherits from WidgetBlueprint — cast to access widget_tree
-wb = unreal.cast(widget_bp, unreal.WidgetBlueprint)
-if wb is None:
-    wb = widget_bp
-try:
-    tree = wb.widget_tree
-except AttributeError:
-    tree = wb.get_editor_property("widget_tree")
+# widget_tree is not directly exposed on EditorUtilityWidgetBlueprint in Python.
+# get_editor_property() accesses the raw UPROPERTY via reflection on any UObject.
+tree = widget_bp.get_editor_property("widget_tree")
+if tree is None:
+    raise RuntimeError("widget_tree returned None — blueprint may not have compiled.")
 
 # ── Layout helpers ────────────────────────────────────────────────────────────
 def _vbox_slot(parent, child,
