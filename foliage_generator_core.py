@@ -24,7 +24,7 @@ import time
 
 WIDGET_ASSET_PATH = "/Game/FoliageGenerator/EUW_FoliageGenerator"
 # Full UE object path (Package.AssetName) required by find_object / load_object
-WIDGET_OBJECT_PATH = WIDGET_OBJECT_PATH
+WIDGET_OBJECT_PATH = WIDGET_ASSET_PATH + "." + WIDGET_ASSET_PATH.split("/")[-1]
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  STANDALONE FALLBACKS  (used only when no widget is running)
