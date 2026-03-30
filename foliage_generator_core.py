@@ -23,6 +23,8 @@ import time
 # ══════════════════════════════════════════════════════════════════════════════
 
 WIDGET_ASSET_PATH = "/Game/FoliageGenerator/EUW_FoliageGenerator"
+# Full UE object path (Package.AssetName) required by find_object / load_object
+WIDGET_OBJECT_PATH = WIDGET_OBJECT_PATH
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  STANDALONE FALLBACKS  (used only when no widget is running)
@@ -158,10 +160,9 @@ def _read_widget_config():
         subsystem = unreal.get_editor_subsystem(unreal.EditorUtilitySubsystem)
 
         # Use find_object (no side effects) — load_object would open the asset editor
-        widget_asset = unreal.find_object(None, WIDGET_ASSET_PATH)
+        widget_asset = unreal.find_object(None, WIDGET_OBJECT_PATH)
         if widget_asset is None:
-            # Asset not in memory at all — try loading it properly
-            widget_asset = unreal.load_object(None, WIDGET_ASSET_PATH + "." + WIDGET_ASSET_PATH.split("/")[-1])
+            widget_asset = unreal.load_object(unreal.EditorUtilityWidgetBlueprint, WIDGET_OBJECT_PATH)
 
         if widget_asset is None:
             print("[Foliage] ⚠  Widget asset not found at: " + WIDGET_ASSET_PATH)
@@ -346,9 +347,9 @@ def _set_widget_status(message):
     """Write message to the widget's StatusLog text box if it's open."""
     try:
         subsystem    = unreal.get_editor_subsystem(unreal.EditorUtilitySubsystem)
-        widget_asset = unreal.find_object(None, WIDGET_ASSET_PATH)
+        widget_asset = unreal.find_object(None, WIDGET_OBJECT_PATH)
         if not widget_asset:
-            widget_asset = unreal.load_object(None, WIDGET_ASSET_PATH + "." + WIDGET_ASSET_PATH.split("/")[-1])
+            widget_asset = unreal.load_object(unreal.EditorUtilityWidgetBlueprint, WIDGET_OBJECT_PATH)
         if not widget_asset:
             return
         widget = subsystem.find_utility_widget_from_blueprint(widget_asset)

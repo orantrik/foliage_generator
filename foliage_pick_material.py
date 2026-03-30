@@ -13,7 +13,8 @@ WORKFLOW:
 import unreal
 import subprocess
 
-WIDGET_ASSET_PATH = "/Game/FoliageGenerator/EUW_FoliageGenerator"
+WIDGET_ASSET_PATH  = "/Game/FoliageGenerator/EUW_FoliageGenerator"
+WIDGET_OBJECT_PATH = WIDGET_ASSET_PATH + "." + WIDGET_ASSET_PATH.split("/")[-1]
 
 
 # ── Widget child access ───────────────────────────────────────────────────────
@@ -115,9 +116,9 @@ def pick_material_from_selection():
 
     # 4. Write into widget — with clipboard fallback
     subsystem    = unreal.get_editor_subsystem(unreal.EditorUtilitySubsystem)
-    widget_asset = unreal.find_object(None, WIDGET_ASSET_PATH)
+    widget_asset = unreal.find_object(None, WIDGET_OBJECT_PATH)
     if not widget_asset:
-        widget_asset = unreal.load_object(None, WIDGET_ASSET_PATH + "." + WIDGET_ASSET_PATH.split("/")[-1])
+        widget_asset = unreal.load_object(unreal.EditorUtilityWidgetBlueprint, WIDGET_OBJECT_PATH)
     widget = subsystem.find_utility_widget_from_blueprint(widget_asset) if widget_asset else None
 
     wrote_to_widget = False
