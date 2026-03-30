@@ -1,17 +1,16 @@
 """
 Foliage Generator Core — Unreal Engine 5
 =========================================
-Scans the current level for StaticMesh surfaces that use the target material,
-then places foliage instances on those surfaces according to spacing rules
-derived from the Israeli National Guide for Shading Trees (2020).
+Reads all settings from the running EUW_FoliageGenerator widget (material path,
+selected foliage types, categories, seed) and places foliage instances on every
+surface in the level that uses that material.
 
-HOW TO USE (standalone):
-  In UE5 Output Log → Python:
+Spacing / density rules follow the Israeli National Guide for Shading Trees (2020).
+
+HOW TO RUN:
+  Called automatically by the widget's Generate button.
+  Can also be run standalone from Output Log:
     exec(open(r"C:/FoliageGen/foliage_generator_core.py").read())
-
-HOW TO USE (from widget):
-  The EUW_FoliageGenerator widget calls this file automatically.
-  Edit USER CONFIG below before running the widget.
 """
 
 import unreal
@@ -20,61 +19,52 @@ import math
 import time
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  USER CONFIG  ── only section you need to edit
+#  WIDGET ASSET PATH  ── only change if you moved the widget in Content Browser
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Path to the material whose surfaces will receive foliage
-TARGET_MATERIAL_PATH = "/Game/Materials/M_YourMaterial"  # TODO: replace
-
-# List of FoliageType assets + their planting category
-# Use the same asset paths you see in the UE5 Foliage Tool panel
-FOLIAGE_TYPES = [
-    # (content_path,                       category)
-    ("/Game/Foliage/FT_LargeTree",  "LARGE_TREE"),   # TODO: replace
-    ("/Game/Foliage/FT_MediumTree", "MEDIUM_TREE"),  # TODO: replace
-    ("/Game/Foliage/FT_SmallTree",  "SMALL_TREE"),   # TODO: replace
-    ("/Game/Foliage/FT_Shrub",      "SHRUB"),         # TODO: replace
-]
-
-# Seed for reproducible random jitter — change to get a different layout
-PLACEMENT_SEED = 42
-
-# Height above surface to start line traces (cm)
-TRACE_HEIGHT_OFFSET = 5000
+WIDGET_ASSET_PATH = "/Game/FoliageGenerator/EUW_FoliageGenerator"
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  CATEGORY RULES  ── from Israeli National Guide for Shading Trees (2020)
+#  STANDALONE FALLBACKS  (used only when no widget is running)
+# ══════════════════════════════════════════════════════════════════════════════
+
+FALLBACK_MATERIAL_PATH = "/Game/Materials/M_YourMaterial"
+FALLBACK_FOLIAGE_TYPES = []   # populate if running without the widget
+FALLBACK_SEED          = 42
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  CATEGORY RULES  ── Israeli National Guide for Shading Trees (2020)
 # ══════════════════════════════════════════════════════════════════════════════
 #
-#  spacing      : average distance between plants (cm), mid-point of guide range
-#  jitter       : max random offset as fraction of spacing (adds natural variation)
-#  scale        : (min, max) random uniform scale applied to each instance
-#  align_normal : True  → tilt instance to match surface normal (shrubs/groundcover)
-#                 False → keep instance upright (trees)
+#  spacing      : average plant-to-plant distance (cm), mid-point of guide range
+#  jitter       : random offset as fraction of spacing (natural variation)
+#  scale        : (min, max) uniform scale applied per instance
+#  align_normal : True  → tilt to match surface normal  (shrubs / groundcover)
+#                 False → keep upright with random yaw   (trees)
 #
 CATEGORY_RULES = {
-    # Large trees  (10 m+) — spacing 10–15 m (guide §4.1, table 1)
+    # Large trees  (10 m+)  — guide §4.1 table 1 : spacing 10–15 m
     "LARGE_TREE": {
         "spacing":      1250,
         "jitter":       0.20,
         "scale":        (0.90, 1.10),
         "align_normal": False,
     },
-    # Medium trees (7–9 m) — spacing 7–10 m (guide §4.1, table 1)
+    # Medium trees (7–9 m)  — guide §4.1 table 1 : spacing 7–10 m
     "MEDIUM_TREE": {
         "spacing":      850,
         "jitter":       0.20,
         "scale":        (0.85, 1.15),
         "align_normal": False,
     },
-    # Small trees  (5–6 m) — spacing 4–7 m (guide §4.1, table 1)
+    # Small trees  (5–6 m)  — guide §4.1 table 1 : spacing 4–7 m
     "SMALL_TREE": {
         "spacing":      550,
         "jitter":       0.20,
         "scale":        (0.80, 1.20),
         "align_normal": True,
     },
-    # Shrubs       (<3 m)  — spacing 1.5–3 m (guide §5.2)
+    # Shrubs       (<3 m)   — guide §5.2 : spacing 1.5–3 m
     "SHRUB": {
         "spacing":      225,
         "jitter":       0.25,
@@ -83,13 +73,90 @@ CATEGORY_RULES = {
     },
 }
 
+TRACE_HEIGHT_OFFSET = 5000   # cm above top of actor to start line traces
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  READ CONFIG FROM RUNNING WIDGET
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _read_widget_config():
+    """
+    Connect to the running EUW_FoliageGenerator widget and read:
+      - material path from MaterialPathInput
+      - seed from SeedInput
+      - enabled foliage types + categories from each foliage row
+    Returns a dict, or None if the widget is not open.
+    """
+    try:
+        subsystem = unreal.get_editor_subsystem(unreal.EditorUtilitySubsystem)
+        widget_asset = unreal.load_object(None, WIDGET_ASSET_PATH)
+        if widget_asset is None:
+            return None
+
+        widget = subsystem.find_utility_widget_from_blueprint(widget_asset)
+        if widget is None:
+            return None
+
+        # ── Material path ─────────────────────────────────────────────────
+        mat_input = widget.get_widget_from_name("MaterialPathInput")
+        material_path = str(mat_input.get_text()) if mat_input else ""
+        material_path = material_path.strip()
+        if not material_path:
+            print("[Foliage] ⚠  Material path is empty — set it in the widget.")
+            return None
+
+        # ── Seed ──────────────────────────────────────────────────────────
+        seed_input = widget.get_widget_from_name("SeedInput")
+        seed = FALLBACK_SEED
+        if seed_input:
+            try:
+                seed = int(str(seed_input.get_text()).strip())
+            except ValueError:
+                pass
+
+        # ── Foliage types — scan every row in the widget ──────────────────
+        asset_registry = unreal.AssetRegistryHelpers.get_asset_registry()
+        ft_assets = asset_registry.get_assets_by_class(
+            unreal.TopLevelAssetPath("/Script/Foliage", "FoliageType_InstancedStaticMesh")
+        )
+
+        foliage_types = []
+        for ft in ft_assets:
+            asset_name = str(ft.asset_name)
+            safe_name  = asset_name.replace(".", "_").replace("/", "_").replace(" ", "_")
+
+            cb  = widget.get_widget_from_name(f"CB_{safe_name}")
+            cat = widget.get_widget_from_name(f"CAT_{safe_name}")
+
+            if cb is None or not cb.get_is_checked():
+                continue
+
+            category = cat.get_selected_option() if cat else "MEDIUM_TREE"
+            # Build loadable asset path:  /PackagePath/AssetName
+            pkg  = str(ft.package_path)
+            name = str(ft.asset_name)
+            asset_path = f"{pkg}/{name}"
+            foliage_types.append((asset_path, category))
+
+        return {
+            "material_path": material_path,
+            "seed":          seed,
+            "foliage_types": foliage_types,
+        }
+
+    except Exception as e:
+        print(f"[Foliage] Widget read error: {e}")
+        return None
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _material_matches(component, target_path):
-    """Return True if any material slot on this component matches target_path."""
-    target_path_clean = target_path.rstrip("_C").split(".")[0]
+    """Return True if any material slot on the component matches target_path."""
+    target_clean = target_path.rstrip("_C")
+    if "." in target_clean:
+        target_clean = target_clean.rsplit(".", 1)[0]
     try:
         mats = component.get_materials()
     except Exception:
@@ -98,51 +165,40 @@ def _material_matches(component, target_path):
         if mat is None:
             continue
         mat_path = mat.get_path_name()
-        # Check base path, parent, and instance parent
-        if target_path_clean in mat_path:
+        if "." in mat_path:
+            mat_path = mat_path.rsplit(".", 1)[0]
+        if target_clean in mat_path or mat_path in target_clean:
             return True
-        # Check if it's a material instance and compare parent
-        if hasattr(mat, "parent"):
-            parent = mat.parent
-            if parent and target_path_clean in parent.get_path_name():
+        # Also check material instance parent
+        if hasattr(mat, "parent") and mat.parent:
+            parent_path = mat.parent.get_path_name()
+            if "." in parent_path:
+                parent_path = parent_path.rsplit(".", 1)[0]
+            if target_clean in parent_path or parent_path in target_clean:
                 return True
     return False
 
 
 def _normal_to_rotator(normal):
-    """Convert a surface normal vector to a Rotator aligned with that normal."""
-    # Z-up world to surface normal rotation
-    up = unreal.Vector(0.0, 0.0, 1.0)
-    nx, ny, nz = normal.x, normal.y, normal.z
-
-    # Pitch: angle between surface normal and world-up projected onto XZ plane
-    pitch = math.degrees(math.asin(max(-1.0, min(1.0, ny))))
-    # Roll: angle around forward axis
-    roll  = math.degrees(math.atan2(nx, nz))
-
+    """Surface normal vector → Rotator aligned with that normal."""
+    pitch = math.degrees(math.asin(max(-1.0, min(1.0, normal.y))))
+    roll  = math.degrees(math.atan2(normal.x, normal.z))
     return unreal.Rotator(pitch, 0.0, roll)
 
 
 def _find_matching_actors(world, target_material_path):
-    """Return all StaticMeshActors whose meshes use the target material."""
     matching = []
-    actors = unreal.EditorLevelLibrary.get_all_level_actors()
-    for actor in actors:
+    for actor in unreal.EditorLevelLibrary.get_all_level_actors():
         if not isinstance(actor, unreal.StaticMeshActor):
             continue
-        mesh_comp = actor.get_component_by_class(unreal.StaticMeshComponent)
-        if mesh_comp and _material_matches(mesh_comp, target_material_path):
+        comp = actor.get_component_by_class(unreal.StaticMeshComponent)
+        if comp and _material_matches(comp, target_material_path):
             matching.append(actor)
     return matching
 
 
 def _generate_candidate_points(origin, extent, spacing, jitter_frac, rng):
-    """
-    Generate a uniform grid of XY candidate points within the actor bounding box,
-    with seeded random jitter applied to each point.
-
-    Returns list of (x, y) tuples in world space.
-    """
+    """Uniform grid with seeded random jitter within actor bounding box."""
     x_min = origin.x - extent.x
     x_max = origin.x + extent.x
     y_min = origin.y - extent.y
@@ -162,146 +218,156 @@ def _generate_candidate_points(origin, extent, spacing, jitter_frac, rng):
     return points
 
 
-def _line_trace_to_surface(world, x, y, top_z, target_material_path):
-    """
-    Cast a ray straight down from (x, y, top_z + offset) and return
-    (hit_location, hit_normal) if the hit surface uses the target material,
-    or None otherwise.
-    """
+def _trace_to_surface(world, x, y, top_z, target_material_path):
+    """Line trace downward; return (location, normal) or None."""
     start = unreal.Vector(x, y, top_z + TRACE_HEIGHT_OFFSET)
     end   = unreal.Vector(x, y, top_z - TRACE_HEIGHT_OFFSET * 2)
 
-    hit_result = unreal.SystemLibrary.line_trace_single(
-        world,
-        start,
-        end,
+    hit = unreal.SystemLibrary.line_trace_single(
+        world, start, end,
         unreal.TraceTypeQuery.TRACE_TYPE_QUERY1,
-        False,    # trace complex
-        [],       # actors to ignore
-        unreal.DrawDebugTrace.NONE,
-        True,     # ignore self
+        False, [], unreal.DrawDebugTrace.NONE, True,
     )
-
-    if not hit_result:
+    if not hit:
         return None
-
-    # Verify the hit component uses our target material
-    hit_component = hit_result.component
-    if hit_component is None:
+    comp = hit.component
+    if comp is None or not _material_matches(comp, target_material_path):
         return None
-    if not _material_matches(hit_component, target_material_path):
-        return None
-
-    return hit_result.location, hit_result.normal
+    return hit.location, hit.normal
 
 
 def _build_transform(location, normal, scale_range, align_normal, rng):
-    """Build a placement Transform from hit data."""
     scale_val = rng.uniform(*scale_range)
-    scale = unreal.Vector(scale_val, scale_val, scale_val)
-
     if align_normal:
         rotation = _normal_to_rotator(normal)
     else:
-        # Upright, but random yaw so each tree faces a different direction
-        yaw = rng.uniform(0.0, 360.0)
-        rotation = unreal.Rotator(0.0, yaw, 0.0)
+        rotation = unreal.Rotator(0.0, rng.uniform(0.0, 360.0), 0.0)
+    return unreal.Transform(location, rotation, unreal.Vector(scale_val, scale_val, scale_val))
 
-    return unreal.Transform(location, rotation, scale)
+# ══════════════════════════════════════════════════════════════════════════════
+#  UPDATE WIDGET STATUS LOG
+# ══════════════════════════════════════════════════════════════════════════════
 
+def _set_widget_status(message):
+    """Write message to the widget's StatusLog text box if it's open."""
+    try:
+        subsystem = unreal.get_editor_subsystem(unreal.EditorUtilitySubsystem)
+        widget_asset = unreal.load_object(None, WIDGET_ASSET_PATH)
+        if not widget_asset:
+            return
+        widget = subsystem.find_utility_widget_from_blueprint(widget_asset)
+        if not widget:
+            return
+        log = widget.get_widget_from_name("StatusLog")
+        if log:
+            log.set_text(unreal.Text.cast(message))
+    except Exception:
+        pass
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  MAIN
 # ══════════════════════════════════════════════════════════════════════════════
 
-def generate_foliage(
-    target_material_path=TARGET_MATERIAL_PATH,
-    foliage_types=FOLIAGE_TYPES,
-    seed=PLACEMENT_SEED,
-):
-    """
-    Main entry point.  Can be called directly or invoked by the EUW widget.
-
-    Args:
-        target_material_path : content path of the material to detect
-        foliage_types        : list of (asset_path, category) tuples
-        seed                 : random seed for jitter reproducibility
-    """
+def generate_foliage():
     t0 = time.time()
-    rng = random.Random(seed)
+
+    # ── Read config: widget first, then fallback ──────────────────────────────
+    cfg = _read_widget_config()
+    if cfg:
+        material_path = cfg["material_path"]
+        foliage_types = cfg["foliage_types"]
+        seed          = cfg["seed"]
+        print("[Foliage] Config read from widget.")
+    else:
+        print("[Foliage] Widget not found — using standalone fallback config.")
+        material_path = FALLBACK_MATERIAL_PATH
+        foliage_types = FALLBACK_FOLIAGE_TYPES
+        seed          = FALLBACK_SEED
+
+    rng   = random.Random(seed)
     world = unreal.EditorLevelLibrary.get_editor_world()
 
-    print("\n─────────────────────────────────────────")
-    print("  Foliage Generator")
-    print(f"  Material : {target_material_path}")
-    print(f"  Seed     : {seed}")
-    print("─────────────────────────────────────────")
+    header = (
+        f"\n{'─'*52}\n"
+        f"  Foliage Generator\n"
+        f"  Material : {material_path}\n"
+        f"  Seed     : {seed}\n"
+        f"  Types    : {len(foliage_types)}\n"
+        f"{'─'*52}"
+    )
+    print(header)
+    _set_widget_status(f"Running...\nMaterial: {material_path}\nSeed: {seed}")
 
-    # ── 1. Find actors using target material ──────────────────────────────────
-    matching_actors = _find_matching_actors(world, target_material_path)
-    if not matching_actors:
-        print(f"\n⚠  No StaticMeshActors found using material: {target_material_path}")
-        print("   Check TARGET_MATERIAL_PATH and try again.")
+    if not foliage_types:
+        msg = "⚠  No foliage types selected.\nCheck at least one foliage asset in the widget."
+        print(f"[Foliage] {msg}")
+        _set_widget_status(msg)
         return
 
-    print(f"\n✓ Found {len(matching_actors)} actor(s) using the target material.")
+    # ── Find matching actors ──────────────────────────────────────────────────
+    matching_actors = _find_matching_actors(world, material_path)
+    if not matching_actors:
+        msg = f"⚠  No actors found using:\n{material_path}\n\nSelect an actor with that material\nand check the path is correct."
+        print(f"[Foliage] {msg}")
+        _set_widget_status(msg)
+        return
 
-    # ── 2. Get the foliage actor for the current level ────────────────────────
+    print(f"[Foliage] Found {len(matching_actors)} matching actor(s).")
+
+    # ── Get / create foliage actor ────────────────────────────────────────────
     foliage_actor = unreal.InstancedFoliageActor.get_instanced_foliage_actor_for_current_level(
         world, True
     )
 
     total_placed = 0
+    log_lines    = [f"Material: {material_path}", f"Seed: {seed}", ""]
 
-    # ── 3. For each foliage type, generate and place instances ────────────────
-    with unreal.ScopedEditorTransaction("Generate Foliage on Material Surface"):
+    with unreal.ScopedEditorTransaction("Foliage Generator — place foliage"):
         for ft_path, category in foliage_types:
-            # Load the FoliageType asset
             ft_asset = unreal.load_object(None, ft_path)
             if ft_asset is None:
-                print(f"\n⚠  FoliageType not found: {ft_path}  (skipped)")
+                print(f"[Foliage] ⚠  Could not load: {ft_path}")
                 continue
 
-            rules   = CATEGORY_RULES.get(category, CATEGORY_RULES["MEDIUM_TREE"])
-            spacing = rules["spacing"]
-            jitter  = rules["jitter"]
-            sc_min, sc_max = rules["scale"]
-            align   = rules["align_normal"]
-
+            rules     = CATEGORY_RULES.get(category, CATEGORY_RULES["MEDIUM_TREE"])
             transforms = []
 
             for actor in matching_actors:
                 origin, extent = actor.get_actor_bounds(False)
                 top_z = origin.z + extent.z
 
-                candidates = _generate_candidate_points(
-                    origin, extent, spacing, jitter, rng
-                )
-
-                for cx, cy in candidates:
-                    result = _line_trace_to_surface(
-                        world, cx, cy, top_z, target_material_path
-                    )
+                for cx, cy in _generate_candidate_points(
+                    origin, extent, rules["spacing"], rules["jitter"], rng
+                ):
+                    result = _trace_to_surface(world, cx, cy, top_z, material_path)
                     if result is None:
                         continue
                     hit_loc, hit_normal = result
-                    xf = _build_transform(
-                        hit_loc, hit_normal, (sc_min, sc_max), align, rng
+                    transforms.append(
+                        _build_transform(
+                            hit_loc, hit_normal,
+                            rules["scale"], rules["align_normal"], rng,
+                        )
                     )
-                    transforms.append(xf)
 
             if transforms:
                 foliage_actor.add_instances(ft_asset, transforms, True)
-                print(f"  ✓ {ft_path.split('/')[-1]:30s}  [{category:12s}]  →  {len(transforms):>5} instances")
+                asset_label = ft_path.split("/")[-1]
+                line = f"✓ {asset_label} [{category}] → {len(transforms)} instances"
+                print(f"[Foliage]   {line}")
+                log_lines.append(line)
                 total_placed += len(transforms)
             else:
-                print(f"  –  {ft_path.split('/')[-1]:30s}  [{category:12s}]  →  no valid points")
+                asset_label = ft_path.split("/")[-1]
+                line = f"–  {asset_label} [{category}] → no valid points"
+                print(f"[Foliage]   {line}")
+                log_lines.append(line)
 
     elapsed = time.time() - t0
-    print(f"\n✓ Done — {total_placed} total instances placed in {elapsed:.1f}s")
-    print("─────────────────────────────────────────\n")
+    summary = f"\n✓ Done — {total_placed} instances in {elapsed:.1f}s"
+    print(f"[Foliage] {summary}")
+    log_lines.append(summary)
+    _set_widget_status("\n".join(log_lines))
 
 
-# Run immediately when executed as a standalone script
-if __name__ != "__import__":
-    generate_foliage()
+generate_foliage()
