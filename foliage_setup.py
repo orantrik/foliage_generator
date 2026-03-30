@@ -22,7 +22,8 @@ import os
 
 # Folder containing foliage_generator_core.py and foliage_pick_material.py
 # Use forward slashes. Example: r"C:/FoliageGen"
-SCRIPTS_FOLDER = r"C:/FoliageGen"
+SCRIPTS_FOLDER = r"C:/Users/oranbenshaprut/Documents/Claude/foliage generator"
+
 
 # Where to create the widget in your Content Browser
 WIDGET_CONTENT_PATH = "/Game/FoliageGenerator"
@@ -47,7 +48,7 @@ asset_registry = unreal.AssetRegistryHelpers.get_asset_registry()
 asset_registry.search_all_assets(True)
 
 # From the level's InstancedFoliageActor (same as the Foliage Tool panel)
-world            = unreal.EditorLevelLibrary.get_editor_world()
+world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
 foliage_tool_paths = set()
 try:
     foliage_actor = unreal.InstancedFoliageActor.get_instanced_foliage_actor_for_current_level(
@@ -101,7 +102,14 @@ print(f"[Setup] Widget blueprint created.")
 #  STEP 3 — Build widget tree
 # ══════════════════════════════════════════════════════════════════════════════
 
-tree = widget_bp.widget_tree
+# EditorUtilityWidgetBlueprint inherits from WidgetBlueprint — cast to access widget_tree
+wb = unreal.cast(widget_bp, unreal.WidgetBlueprint)
+if wb is None:
+    wb = widget_bp
+try:
+    tree = wb.widget_tree
+except AttributeError:
+    tree = wb.get_editor_property("widget_tree")
 
 # ── Layout helpers ────────────────────────────────────────────────────────────
 def _vbox_slot(parent, child,

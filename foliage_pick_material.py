@@ -55,7 +55,7 @@ def pick_material_from_selection():
     updates EUW_FoliageGenerator's MaterialPathInput.
     """
     # ── 1. Get selected actors ────────────────────────────────────────────────
-    selected = unreal.EditorLevelLibrary.get_selected_level_actors()
+    selected = unreal.get_editor_subsystem(unreal.EditorActorSubsystem).get_selected_level_actors()
     if not selected:
         print("[Pick Material] ⚠  Nothing selected in the viewport.")
         print("               Click on a surface first, then press Pick.")

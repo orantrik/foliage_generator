@@ -188,7 +188,7 @@ def _normal_to_rotator(normal):
 
 def _find_matching_actors(world, target_material_path):
     matching = []
-    for actor in unreal.EditorLevelLibrary.get_all_level_actors():
+    for actor in unreal.get_editor_subsystem(unreal.EditorActorSubsystem).get_all_level_actors():
         if not isinstance(actor, unreal.StaticMeshActor):
             continue
         comp = actor.get_component_by_class(unreal.StaticMeshComponent)
@@ -285,7 +285,7 @@ def generate_foliage():
         seed          = FALLBACK_SEED
 
     rng   = random.Random(seed)
-    world = unreal.EditorLevelLibrary.get_editor_world()
+    world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
 
     header = (
         f"\n{'─'*52}\n"
