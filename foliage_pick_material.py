@@ -5,30 +5,69 @@ Called by the "Pick Material" button in EUW_FoliageGenerator.
 
 WORKFLOW:
   1. Click on any surface in the UE5 viewport to select it
-  2. Click the eyedropper / "Pick" button in the widget
-  3. This script reads the material from the selected actor and
-     writes it back into the widget's MaterialPathInput field
-
-HOW IT WORKS:
-  - Reads the first selected StaticMeshActor in the viewport
-  - Resolves the base material (strips material instance layers)
-  - Finds the running EUW_FoliageGenerator widget via EditorUtilitySubsystem
-  - Sets the MaterialPathInput text to the resolved path
+  2. Click  ↗ Pick Material from Selection  in the widget
+  3. The material path is written into MaterialPathInput automatically.
+     If that fails, it is copied to the clipboard — just Ctrl+V.
 """
 
 import unreal
+import subprocess
 
 WIDGET_ASSET_PATH = "/Game/FoliageGenerator/EUW_FoliageGenerator"
 
 
+# ── Widget child access ───────────────────────────────────────────────────────
+
+def _get_widget(parent, name):
+    """
+    Get a named child widget.
+    EditorUtilityWidget's Python binding omits get_widget_from_name,
+    so we fall back to calling it on the UserWidget parent binding.
+    """
+    try:
+        w = parent.get_widget_from_name(name)
+        if w is not None:
+            return w
+    except AttributeError:
+        pass
+    try:
+        w = unreal.UserWidget.get_widget_from_name(parent, name)
+        if w is not None:
+            return w
+    except Exception:
+        pass
+    return None
+
+
+def _set_widget_text(parent, name, text):
+    w = _get_widget(parent, name)
+    if w:
+        try:
+            w.set_text(unreal.Text.cast(text))
+            return True
+        except Exception:
+            pass
+    return False
+
+
+def _copy_to_clipboard(text):
+    """Copy text to Windows clipboard via PowerShell."""
+    try:
+        subprocess.run(
+            ["powershell", "-command", f"Set-Clipboard -Value '{text}'"],
+            capture_output=True, timeout=5
+        )
+        return True
+    except Exception:
+        return False
+
+
+# ── Material resolution ───────────────────────────────────────────────────────
+
 def _resolve_base_material_path(mat):
-    """
-    Walk up the material instance chain to find the root Material asset path.
-    Returns the clean content-browser path, e.g. /Game/Materials/M_Ground
-    """
-    # Unwrap material instances to get the base material
+    """Walk material instance chain → return clean /Game/... path."""
     current = mat
-    for _ in range(10):   # safety limit for deep instance chains
+    for _ in range(10):
         if isinstance(current, unreal.MaterialInstance):
             parent = current.get_editor_property("parent")
             if parent is not None:
@@ -37,97 +76,64 @@ def _resolve_base_material_path(mat):
         break
 
     path = current.get_path_name()
-
-    # Strip sub-object suffix:  /Game/Mat.Mat:SomeSub  →  /Game/Mat.Mat
     if ":" in path:
         path = path.split(":")[0]
-
-    # Strip asset-name suffix:  /Game/Mat.Mat  →  /Game/Mat
     if "." in path:
         path = path.rsplit(".", 1)[0]
-
     return path
 
 
+# ── Main ──────────────────────────────────────────────────────────────────────
+
 def pick_material_from_selection():
-    """
-    Main entry point.  Reads selected viewport actor → material →
-    updates EUW_FoliageGenerator's MaterialPathInput.
-    """
-    # ── 1. Get selected actors ────────────────────────────────────────────────
-    selected = unreal.get_editor_subsystem(unreal.EditorActorSubsystem).get_selected_level_actors()
+    # 1. Get selected actor
+    selected = unreal.get_editor_subsystem(
+        unreal.EditorActorSubsystem
+    ).get_selected_level_actors()
+
     if not selected:
-        print("[Pick Material] ⚠  Nothing selected in the viewport.")
-        print("               Click on a surface first, then press Pick.")
-        _set_widget_status("⚠  Nothing selected.\nClick on a surface in the viewport first,\nthen press Pick Material.")
+        print("[Pick Material] ⚠  Nothing selected — click a surface first.")
         return
 
     actor = selected[0]
 
-    # ── 2. Get material from the first mesh component ─────────────────────────
+    # 2. Get material
     mesh_comp = actor.get_component_by_class(unreal.StaticMeshComponent)
     if mesh_comp is None:
         print(f"[Pick Material] ⚠  '{actor.get_actor_label()}' has no StaticMeshComponent.")
-        _set_widget_status(f"⚠  Selected actor has no mesh:\n{actor.get_actor_label()}")
         return
 
-    materials = mesh_comp.get_materials()
-    mat = next((m for m in materials if m is not None), None)
+    mat = next((m for m in mesh_comp.get_materials() if m is not None), None)
     if mat is None:
-        print(f"[Pick Material] ⚠  No material found on '{actor.get_actor_label()}'.")
-        _set_widget_status(f"⚠  No material on:\n{actor.get_actor_label()}")
+        print(f"[Pick Material] ⚠  No material on '{actor.get_actor_label()}'.")
         return
 
-    # ── 3. Resolve base material path ────────────────────────────────────────
+    # 3. Resolve base path
     mat_path = _resolve_base_material_path(mat)
-
     print(f"[Pick Material] Actor   : {actor.get_actor_label()}")
     print(f"[Pick Material] Material: {mat_path}")
 
-    # ── 4. Update the widget ──────────────────────────────────────────────────
-    try:
-        subsystem    = unreal.get_editor_subsystem(unreal.EditorUtilitySubsystem)
-        widget_asset = unreal.load_object(None, WIDGET_ASSET_PATH)
+    # 4. Write into widget — with clipboard fallback
+    subsystem    = unreal.get_editor_subsystem(unreal.EditorUtilitySubsystem)
+    widget_asset = unreal.load_object(None, WIDGET_ASSET_PATH)
+    widget       = subsystem.find_utility_widget_from_blueprint(widget_asset) if widget_asset else None
 
-        if widget_asset is None:
-            print(f"[Pick Material] ⚠  Widget not found at {WIDGET_ASSET_PATH}.")
-            return
+    wrote_to_widget = False
+    if widget:
+        wrote_to_widget = _set_widget_text(widget, "MaterialPathInput", mat_path)
+        if wrote_to_widget:
+            print("[Pick Material] ✓ MaterialPathInput updated.")
+            _set_widget_text(
+                widget, "StatusLog",
+                f"Material picked:\n{mat_path}\n\nFrom actor: {actor.get_actor_label()}"
+            )
 
-        widget = subsystem.find_utility_widget_from_blueprint(widget_asset)
-        if widget is None:
-            print("[Pick Material] ⚠  EUW_FoliageGenerator is not open.")
-            print("               Run Editor Utility Widget first.")
-            return
-
-        mat_input = widget.get_widget_from_name("MaterialPathInput")
-        if mat_input is None:
-            print("[Pick Material] ⚠  MaterialPathInput widget not found.")
-            return
-
-        mat_input.set_text(unreal.Text.cast(mat_path))
-        print(f"[Pick Material] ✓ Set material path in widget.")
-
-        _set_widget_status(f"Material picked:\n{mat_path}\n\nFrom actor: {actor.get_actor_label()}")
-
-    except Exception as e:
-        print(f"[Pick Material] Error: {e}")
-
-
-def _set_widget_status(message):
-    """Write a status message to the widget's StatusLog if it's running."""
-    try:
-        subsystem    = unreal.get_editor_subsystem(unreal.EditorUtilitySubsystem)
-        widget_asset = unreal.load_object(None, WIDGET_ASSET_PATH)
-        if not widget_asset:
-            return
-        widget = subsystem.find_utility_widget_from_blueprint(widget_asset)
-        if not widget:
-            return
-        log = widget.get_widget_from_name("StatusLog")
-        if log:
-            log.set_text(unreal.Text.cast(message))
-    except Exception:
-        pass
+    if not wrote_to_widget:
+        # Fallback: copy to clipboard so user can Ctrl+V into the field
+        if _copy_to_clipboard(mat_path):
+            print("[Pick Material] ✓ Path copied to clipboard — Ctrl+V into the material field.")
+        else:
+            print(f"[Pick Material] ✓ Copy this path manually:\n  {mat_path}")
 
 
 pick_material_from_selection()

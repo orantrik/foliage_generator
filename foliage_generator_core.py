@@ -76,6 +76,30 @@ CATEGORY_RULES = {
 TRACE_HEIGHT_OFFSET = 5000   # cm above top of actor to start line traces
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  WIDGET CHILD ACCESS HELPER
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _get_widget(parent, name):
+    """
+    Get a named child widget from a running UUserWidget / EditorUtilityWidget.
+    EditorUtilityWidget's Python binding omits get_widget_from_name, so we
+    fall back to calling it on the UserWidget parent binding explicitly.
+    """
+    try:
+        w = parent.get_widget_from_name(name)
+        if w is not None:
+            return w
+    except AttributeError:
+        pass
+    try:
+        w = unreal.UserWidget.get_widget_from_name(parent, name)
+        if w is not None:
+            return w
+    except Exception:
+        pass
+    return None
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  READ CONFIG FROM RUNNING WIDGET
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -141,7 +165,7 @@ def _read_widget_config():
             return None
 
         # ── Material path ─────────────────────────────────────────────────
-        mat_input     = widget.get_widget_from_name("MaterialPathInput")
+        mat_input     = _get_widget(widget,"MaterialPathInput")
         material_path = str(mat_input.get_text()).strip() if mat_input else ""
         if not material_path:
             _set_widget_status(
@@ -153,7 +177,7 @@ def _read_widget_config():
             return None
 
         # ── Seed ──────────────────────────────────────────────────────────
-        seed_input = widget.get_widget_from_name("SeedInput")
+        seed_input = _get_widget(widget,"SeedInput")
         seed = FALLBACK_SEED
         if seed_input:
             try:
@@ -162,7 +186,7 @@ def _read_widget_config():
                 pass
 
         # ── Foliage config ────────────────────────────────────────────────
-        cfg_box      = widget.get_widget_from_name("FoliageConfig")
+        cfg_box      = _get_widget(widget,"FoliageConfig")
         cfg_text     = str(cfg_box.get_text()).strip() if cfg_box else ""
         foliage_types = _parse_foliage_config(cfg_text)
 
@@ -317,7 +341,7 @@ def _set_widget_status(message):
         widget = subsystem.find_utility_widget_from_blueprint(widget_asset)
         if not widget:
             return
-        log = widget.get_widget_from_name("StatusLog")
+        log = _get_widget(widget,"StatusLog")
         if log:
             log.set_text(unreal.Text.cast(message))
     except Exception:
