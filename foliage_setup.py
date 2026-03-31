@@ -87,12 +87,16 @@ print("""
   │   ├─ Button              → name: "PickMaterialBtn"
   │   │    └─ TextBlock         text: "↗ Pick Material from Selection"
   │   │
+  │   ├─ EditableTextBox     → name: "MeshFolderInput"
+  │   │    hint text: "/Game/  (folder to scan for meshes)"
+  │   │    default text: "/Game/"
+  │   │
   │   ├─ EditableTextBox     → name: "SeedInput"
   │   │    default text: "42"
   │   │
   │   ├─ MultiLineEditableTextBox  → name: "FoliageConfig"
-  │   │    hint: "Click Generate once to auto-fill this list"
-  │   │    height: ~120 px
+  │   │    hint: "Leave empty → click Generate to auto-fill"
+  │   │    height: ~150 px
   │   │
   │   ├─ Button              → name: "GenerateBtn"
   │   │    └─ TextBlock         text: "▶  Generate Foliage"
@@ -130,11 +134,19 @@ print("""
   Right-click EUW_FoliageGenerator → Run Editor Utility Widget
 
   First run:
+    • Set MeshFolderInput to the folder holding your tree/shrub
+      meshes — e.g. "/Game/Trees/" or keep "/Game/" for all
     • Leave FoliageConfig empty, click ▶ Generate Foliage
-    • The StatusLog will print a ready-made list of all
-      FoliageType assets found in your project
-    • Copy that list into the FoliageConfig box
-    • Edit categories if needed (LARGE_TREE / MEDIUM_TREE /
-      SMALL_TREE / SHRUB), then generate again
+    • StatusLog auto-fills FoliageConfig with every StaticMesh
+      found in that folder (one per line), all set to MEDIUM_TREE
+    • FoliageType assets are created automatically under
+      /Game/FoliageGenerator/AutoTypes/ — no manual step needed
+    • Edit category tags if needed:
+        LARGE_TREE  (10-15 m spacing)
+        MEDIUM_TREE ( 7-10 m spacing)
+        SMALL_TREE  ( 4-7  m spacing)
+        SHRUB       (1.5-3 m spacing)
+    • Delete lines for meshes you don't want placed
+    • Click ▶ Generate Foliage again to place instances
 """)
 print("═" * W + "\n")
