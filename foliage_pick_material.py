@@ -7,60 +7,59 @@ WORKFLOW:
   1. Click on any surface in the UE5 viewport to select it
   2. Click  ↗ Pick Material from Selection  in the widget
   3. The material path is written into MaterialPathInput automatically.
-     If that fails, it is copied to the clipboard — just Ctrl+V.
+     If widget write fails, the path is saved to last_material.txt next
+     to these scripts — the Generator reads it from there automatically.
 """
 
 import unreal
-import subprocess
+import os
 
 WIDGET_ASSET_PATH  = "/Game/FoliageGenerator/EUW_FoliageGenerator"
 WIDGET_OBJECT_PATH = WIDGET_ASSET_PATH + "." + WIDGET_ASSET_PATH.split("/")[-1]
+
+_THIS_DIR         = os.path.dirname(os.path.abspath(__file__))
+LAST_MATERIAL_FILE = os.path.join(_THIS_DIR, "last_material.txt")
+
+
+# ── File-based fallback ───────────────────────────────────────────────────────
+
+def _save_material_path(path):
+    """Always write to file — reliable even when widget write fails."""
+    try:
+        with open(LAST_MATERIAL_FILE, "w") as f:
+            f.write(path)
+    except Exception as e:
+        print(f"[Pick Material] ⚠  Could not save last_material.txt: {e}")
 
 
 # ── Widget child access ───────────────────────────────────────────────────────
 
 def _get_widget(parent, name):
-    """
-    Get a named child widget.
-    EditorUtilityWidget's Python binding omits get_widget_from_name,
-    so we fall back to calling it on the UserWidget parent binding.
-    """
-    try:
-        w = parent.get_widget_from_name(name)
-        if w is not None:
-            return w
-    except AttributeError:
-        pass
-    try:
-        w = unreal.UserWidget.get_widget_from_name(parent, name)
-        if w is not None:
-            return w
-    except Exception:
-        pass
+    for fn in [
+        lambda: parent.get_widget_from_name(name),
+        lambda: unreal.UserWidget.get_widget_from_name(parent, name),
+    ]:
+        try:
+            w = fn()
+            if w is not None:
+                return w
+        except Exception:
+            pass
     return None
 
 
 def _set_widget_text(parent, name, text):
     w = _get_widget(parent, name)
-    if w:
+    if w is None:
+        return False
+    # Try multiple text representations — UE5 Python binding varies by version
+    for val in [text, unreal.Text(text)]:
         try:
-            w.set_text(unreal.Text.cast(text))
+            w.set_text(val)
             return True
         except Exception:
-            pass
+            continue
     return False
-
-
-def _copy_to_clipboard(text):
-    """Copy text to Windows clipboard via PowerShell."""
-    try:
-        subprocess.run(
-            ["powershell", "-command", f"Set-Clipboard -Value '{text}'"],
-            capture_output=True, timeout=5
-        )
-        return True
-    except Exception:
-        return False
 
 
 # ── Material resolution ───────────────────────────────────────────────────────
@@ -114,29 +113,39 @@ def pick_material_from_selection():
     print(f"[Pick Material] Actor   : {actor.get_actor_label()}")
     print(f"[Pick Material] Material: {mat_path}")
 
-    # 4. Write into widget — with clipboard fallback
+    # 4. Always save to file first (reliable fallback)
+    _save_material_path(mat_path)
+    print(f"[Pick Material] ✓ Saved to last_material.txt")
+
+    # 5. Try to write into running widget
     subsystem    = unreal.get_editor_subsystem(unreal.EditorUtilitySubsystem)
     widget_asset = unreal.find_object(None, WIDGET_OBJECT_PATH)
     if not widget_asset:
-        widget_asset = unreal.load_object(unreal.EditorUtilityWidgetBlueprint, WIDGET_OBJECT_PATH)
+        widget_asset = unreal.load_object(
+            unreal.EditorUtilityWidgetBlueprint, WIDGET_OBJECT_PATH
+        )
     widget = subsystem.find_utility_widget_from_blueprint(widget_asset) if widget_asset else None
 
-    wrote_to_widget = False
     if widget:
-        wrote_to_widget = _set_widget_text(widget, "MaterialPathInput", mat_path)
-        if wrote_to_widget:
-            print("[Pick Material] ✓ MaterialPathInput updated.")
+        ok = _set_widget_text(widget, "MaterialPathInput", mat_path)
+        if ok:
+            print("[Pick Material] ✓ MaterialPathInput updated in widget.")
             _set_widget_text(
                 widget, "StatusLog",
-                f"Material picked:\n{mat_path}\n\nFrom actor: {actor.get_actor_label()}"
+                f"Material picked:\n{mat_path}\n\nFrom: {actor.get_actor_label()}"
             )
-
-    if not wrote_to_widget:
-        # Fallback: copy to clipboard so user can Ctrl+V into the field
-        if _copy_to_clipboard(mat_path):
-            print("[Pick Material] ✓ Path copied to clipboard — Ctrl+V into the material field.")
         else:
-            print(f"[Pick Material] ✓ Copy this path manually:\n  {mat_path}")
+            print(
+                "[Pick Material] ⚠  Could not write to MaterialPathInput.\n"
+                "                   Paste this path into the field manually:\n"
+                f"                   {mat_path}\n"
+                "                   (also saved to last_material.txt)"
+            )
+    else:
+        print(
+            "[Pick Material] ⚠  Widget not running.\n"
+            "                   Path saved to last_material.txt — Generator will use it."
+        )
 
 
 pick_material_from_selection()

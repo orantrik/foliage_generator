@@ -38,7 +38,8 @@ AUTO_FT_FOLDER     = "/Game/FoliageGenerator/AutoTypes"
 
 # Config file written next to this script — lets you re-run without widget open
 _THIS_DIR   = os.path.dirname(os.path.abspath(__file__))
-CONFIG_FILE = os.path.join(_THIS_DIR, "foliage_config.json")
+CONFIG_FILE         = os.path.join(_THIS_DIR, "foliage_config.json")
+LAST_MATERIAL_FILE  = os.path.join(_THIS_DIR, "last_material.txt")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  CATEGORY RULES  — Israeli National Guide for Shading Trees (2020)
@@ -94,11 +95,14 @@ def _widget_text(widget, name, fallback=""):
 
 def _set_widget_text(widget, name, text):
     w = _get_child(widget, name)
-    if w:
+    if w is None:
+        return
+    for val in [text, unreal.Text(text)]:
         try:
-            w.set_text(unreal.Text.cast(text))
+            w.set_text(val)
+            return
         except Exception:
-            pass
+            continue
 
 
 def _set_status(msg, widget=None):
@@ -227,6 +231,20 @@ def _read_widget_config(widget):
     Saves config to JSON file for future fallback use.
     """
     material_path = _widget_text(widget, "MaterialPathInput")
+
+    # Fallback: read from file written by foliage_pick_material.py
+    if not material_path:
+        try:
+            if os.path.exists(LAST_MATERIAL_FILE):
+                with open(LAST_MATERIAL_FILE) as f:
+                    material_path = f.read().strip()
+                if material_path:
+                    # Write it back into the widget field so the user can see it
+                    _set_widget_text(widget, "MaterialPathInput", material_path)
+                    print(f"[Foliage] Material loaded from last_material.txt: {material_path}")
+        except Exception:
+            pass
+
     if not material_path:
         _set_status(
             "⚠  Material path is empty.\n"
