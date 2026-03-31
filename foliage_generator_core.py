@@ -266,29 +266,48 @@ def _read_widget_config(widget):
     mesh_list = _parse_mesh_config(cfg_text)
 
     if not mesh_list:
-        # Auto-scan and populate
-        _set_status(f"FoliageConfig empty — scanning {mesh_folder} for meshes...", widget)
-        paths = _scan_static_meshes(mesh_folder)
-        if not paths:
-            _set_status(
-                f"⚠  No StaticMesh assets found in {mesh_folder}\n"
-                "Enter a valid content folder in MeshFolderInput,\n"
-                "or type mesh paths manually in FoliageConfig.",
-                widget
-            )
-            return None
+        # Check if a previously saved config already has a mesh list
+        # (user may have edited foliage_config.json after the first scan)
+        saved = _load_config()
+        if saved and saved.get("mesh_list"):
+            mesh_list = [(row[0], row[1]) for row in saved["mesh_list"]]
+            print(f"[Foliage] FoliageConfig widget empty — using {len(mesh_list)} mesh(es) from foliage_config.json")
+        else:
+            # First run: scan and save for the user to edit, then stop
+            _set_status(f"Scanning {mesh_folder} for meshes...", widget)
+            paths = _scan_static_meshes(mesh_folder)
+            if not paths:
+                _set_status(
+                    f"⚠  No StaticMesh assets found in {mesh_folder}\n"
+                    "Set MeshFolderInput to a folder that contains your tree/shrub meshes.",
+                    widget
+                )
+                return None
 
-        starter = "\n".join(f"{p}  MEDIUM_TREE" for p in paths)
-        _set_widget_text(widget, "FoliageConfig", starter)
-        _set_status(
-            f"Found {len(paths)} mesh(es) in {mesh_folder}.\n"
-            "FoliageConfig auto-filled.\n\n"
-            "• Change MEDIUM_TREE to LARGE_TREE / SMALL_TREE / SHRUB as needed\n"
-            "• Delete lines for meshes you do NOT want\n"
-            "• Click ▶ Generate Foliage again",
-            widget
-        )
-        return None
+            auto_cfg = {
+                "material_path": material_path,
+                "seed":          seed,
+                "mesh_folder":   mesh_folder,
+                "mesh_list":     [[p, "MEDIUM_TREE"] for p in paths],
+            }
+            _save_config(auto_cfg)
+
+            preview = "\n  ".join(p.split("/")[-1] for p in paths[:8])
+            if len(paths) > 8:
+                preview += f"\n  … and {len(paths) - 8} more"
+
+            msg = (
+                f"Found {len(paths)} mesh(es). Config saved to:\n"
+                f"{CONFIG_FILE}\n\n"
+                f"First 8 meshes:\n  {preview}\n\n"
+                "Open foliage_config.json in a text editor:\n"
+                "  • Delete lines for non-foliage meshes (roads, buildings, etc.)\n"
+                "  • Change MEDIUM_TREE → LARGE_TREE / SMALL_TREE / SHRUB\n\n"
+                "Then click ▶ Generate Foliage again."
+            )
+            _set_status(msg, widget)
+            print(f"[Foliage] Config written to: {CONFIG_FILE}")
+            return None
 
     cfg = {
         "material_path": material_path,
