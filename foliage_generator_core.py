@@ -380,18 +380,18 @@ def _candidate_points(origin, extent, spacing, jitter, rng):
 
 
 def _trace(world, x, y, top_z, material_path):
-    hit = unreal.SystemLibrary.line_trace_single(
+    did_hit, hit = unreal.SystemLibrary.line_trace_single(
         world,
         unreal.Vector(x, y, top_z + TRACE_HEIGHT_OFFSET),
         unreal.Vector(x, y, top_z - TRACE_HEIGHT_OFFSET * 2),
         unreal.TraceTypeQuery.TRACE_TYPE_QUERY1,
         False, [], unreal.DrawDebugTrace.NONE, True,
     )
-    if not hit:
+    if not did_hit:
         return None
-    if hit.component is None or not _material_matches(hit.component, material_path):
+    if hit.hit_component is None or not _material_matches(hit.hit_component, material_path):
         return None
-    return hit.location, hit.normal
+    return hit.location, hit.impact_normal
 
 
 def _make_transform(loc, normal, scale_range, align_normal, rng):
