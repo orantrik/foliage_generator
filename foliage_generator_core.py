@@ -379,7 +379,10 @@ def _candidate_points(origin, extent, spacing, jitter, rng):
     return pts
 
 
+_hit_attrs_printed = False
+
 def _trace(world, x, y, top_z, material_path):
+    global _hit_attrs_printed
     hit = unreal.SystemLibrary.line_trace_single(
         world,
         unreal.Vector(x, y, top_z + TRACE_HEIGHT_OFFSET),
@@ -387,11 +390,20 @@ def _trace(world, x, y, top_z, material_path):
         unreal.TraceTypeQuery.TRACE_TYPE_QUERY1,
         False, [], unreal.DrawDebugTrace.NONE, True,
     )
-    if not hit.blocking_hit:
+    if not _hit_attrs_printed:
+        _hit_attrs_printed = True
+        attrs = [a for a in dir(hit) if not a.startswith("_")]
+        print(f"[Foliage] HitResult attrs: {attrs}")
+    # Try multiple attribute names used across UE5 Python versions
+    is_hit   = getattr(hit, "blocking_hit",   None) or getattr(hit, "bBlockingHit", None)
+    comp     = getattr(hit, "hit_component",  None) or getattr(hit, "component",    None)
+    location = getattr(hit, "location",       None) or getattr(hit, "impact_point", None)
+    normal   = getattr(hit, "impact_normal",  None) or getattr(hit, "normal",       None)
+    if not is_hit or comp is None:
         return None
-    if hit.hit_component is None or not _material_matches(hit.hit_component, material_path):
+    if not _material_matches(comp, material_path):
         return None
-    return hit.location, hit.impact_normal
+    return location, normal
 
 
 def _make_transform(loc, normal, scale_range, align_normal, rng):
