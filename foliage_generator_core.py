@@ -298,27 +298,43 @@ def _find_matching_actors(material_path):
     return actors
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  POINT GENERATION  — no line traces; uses actor bounding box top-Z
+#  POINT GENERATION  — grid XY from bounding box, Z snapped to ground
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _snap_to_ground(world, x, y, ref_z, offset=20000):
+    """
+    Trace straight down from (x, y, ref_z + offset).
+    Returns the hit Z (any surface — landscape or mesh), or ref_z on miss.
+    No material filter: we just want actual ground height.
+    """
+    start = unreal.Vector(x, y, ref_z + offset)
+    end   = unreal.Vector(x, y, ref_z - offset)
+    hit   = unreal.SystemLibrary.line_trace_single(
+        world, start, end,
+        unreal.TraceTypeQuery.TRACE_TYPE_QUERY1,
+        False, [], unreal.DrawDebugTrace.NONE, True,
+    )
+    t = hit.to_tuple()
+    if t[0]:          # bBlockingHit
+        return t[4].z  # Location.z
+    return ref_z
+
 
 def _grid_points_for_actor(actor, spacing, jitter, rng):
     """
-    Return list of (x, y, z) candidate positions distributed across the
-    top face of this actor's axis-aligned bounding box.
-    Z = top of bounds so meshes sit on the surface (not buried).
+    Return list of (x, y, ref_z) candidate positions across the
+    top face of this actor's AABB.  Z is the bounding-box top — caller
+    passes it to _snap_to_ground to get the real terrain height.
     """
     origin, extent = actor.get_actor_bounds(False)
     x0, x1 = origin.x - extent.x, origin.x + extent.x
     y0, y1 = origin.y - extent.y, origin.y + extent.y
     top_z  = origin.z + extent.z
 
-    # Auto-adjust spacing so we never exceed MAX_POINTS_PER_CATEGORY per actor
     cols = max(1, int((x1 - x0) / spacing))
     rows = max(1, int((y1 - y0) / spacing))
     if cols * rows > MAX_POINTS_PER_CATEGORY:
         spacing *= math.sqrt(cols * rows / MAX_POINTS_PER_CATEGORY)
-        cols = max(1, int((x1 - x0) / spacing))
-        rows = max(1, int((y1 - y0) / spacing))
 
     jr  = spacing * jitter
     pts = []
@@ -362,7 +378,10 @@ def generate_foliage():
     seed          = cfg["seed"]
     mesh_list     = [(row[0], row[1]) for row in cfg["mesh_list"]]
 
-    rng = random.Random(seed)
+    rng   = random.Random(seed)
+    world = unreal.get_editor_subsystem(
+        unreal.UnrealEditorSubsystem
+    ).get_editor_world()
 
     print(f"\n{'─'*52}")
     print(f"  Foliage Generator")
@@ -421,12 +440,13 @@ def generate_foliage():
 
             count = 0
             for (cx, cy, cz) in all_points:
-                sm_path = rng.choice(valid_paths)
-                mesh    = loaded[sm_path]
+                sm_path  = rng.choice(valid_paths)
+                mesh     = loaded[sm_path]
+                ground_z = _snap_to_ground(world, cx, cy, cz)
 
                 s   = rng.uniform(*rules["scale"])
                 yaw = rng.uniform(0.0, 360.0)
-                loc = unreal.Vector(cx, cy, cz)
+                loc = unreal.Vector(cx, cy, ground_z)
                 rot = unreal.Rotator(pitch=0.0, yaw=yaw, roll=0.0)
 
                 placed = editor_subs.spawn_actor_from_class(unreal.StaticMeshActor, loc, rot)
