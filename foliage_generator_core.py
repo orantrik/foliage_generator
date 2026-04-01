@@ -136,8 +136,10 @@ def _load_config():
 def _guess_category(name):
     """Fallback category from mesh/asset name when not in config."""
     n = name.upper()
-    if any(w in n for w in ["SHRUB", "BUSH", "HEDGE", "GRASS", "IVY",
-                             "PLANT", "FERN", "FLOWER", "WEED", "REED"]):
+    # Ground-cover and low vegetation first (broad keyword set)
+    if any(w in n for w in ["SHRUB", "BUSH", "HEDGE", "GRASS", "IVY", "PLANT",
+                             "FERN", "FLOWER", "WEED", "REED", "LEAF", "LEAVES",
+                             "LITTER", "DRY", "GROUND", "COVER", "MOSS"]):
         return "SHRUB"
     if any(w in n for w in ["SMALL", "SAPLING", "YOUNG"]):
         return "SMALL_TREE"
@@ -546,6 +548,18 @@ def generate_foliage():
         return
     print(f"[Foliage] {len(matching)} matching surface actor(s).")
 
+    # Compute valid Z range from the top faces of all matching actors.
+    # Rejects trace hits that land on buried/underground surfaces that happen
+    # to share the same material (common with shared master materials).
+    actor_tops = []
+    for a in matching:
+        o, e = a.get_actor_bounds(False)
+        actor_tops.append(o.z + e.z)
+    z_median  = sorted(actor_tops)[len(actor_tops) // 2]
+    z_min_ok  = z_median - 800    # allow 8 m below median top
+    z_max_ok  = z_median + 2000   # allow 20 m above (sloped terrain)
+    print(f"[Foliage] Valid Z range: {z_min_ok:.0f} – {z_max_ok:.0f} (median top {z_median:.0f})")
+
     # ── 3. Group mesh list by category, apply active_categories filter ────────
     by_category = {}
     for sm_path, category in mesh_list:
@@ -610,12 +624,19 @@ def generate_foliage():
                     rng.shuffle(all_points)
                     all_points = all_points[:MAX_POINTS_PER_CATEGORY]
 
-                count = 0
+                count  = 0
+                misses = 0
                 for (cx, cy, cz) in all_points:
                     # Trace hits only the selected material surface — rejects
                     # landscape, dirt, paths, and anything outside the mesh footprint
                     result = _trace(world, cx, cy, cz, material_path)
                     if result is None:
+                        misses += 1
+                        continue
+                    # Reject hits whose Z is implausibly far from the surface cluster
+                    # (shared master material can match buried/underground actors)
+                    if not (z_min_ok <= result[0].z <= z_max_ok):
+                        misses += 1
                         continue
 
                     loc, normal = result
@@ -659,8 +680,18 @@ def generate_foliage():
                     count += 1
 
                 total += count
-                line = f"✓ {category} ({len(valid_paths)} meshes) → {count} instances"
-                print(f"[Foliage]   {line}")
+                tested = len(all_points)
+                if count == 0 and tested > 0:
+                    line = (f"⚠ {category} ({len(valid_paths)} meshes) → 0 instances "
+                            f"({tested} points tested, all missed surface)")
+                    print(f"[Foliage]   {line}")
+                    print(f"[Foliage]     Tip: spacing={rules['spacing']}cm — "
+                          f"try re-classifying these meshes as SHRUB in foliage_config.json")
+                else:
+                    line = f"✓ {category} ({len(valid_paths)} meshes) → {count} instances"
+                    if misses:
+                        line += f"  ({misses} skipped: no hit / out of Z range)"
+                    print(f"[Foliage]   {line}")
                 lines.append(line)
 
     finally:
