@@ -121,9 +121,7 @@ def pick_material_from_selection():
     subsystem    = unreal.get_editor_subsystem(unreal.EditorUtilitySubsystem)
     widget_asset = unreal.find_object(None, WIDGET_OBJECT_PATH)
     if not widget_asset:
-        widget_asset = unreal.load_object(
-            unreal.EditorUtilityWidgetBlueprint, WIDGET_OBJECT_PATH
-        )
+        widget_asset = unreal.load_object(None, WIDGET_OBJECT_PATH)
     widget = subsystem.find_utility_widget_from_blueprint(widget_asset) if widget_asset else None
 
     if widget:

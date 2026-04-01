@@ -65,7 +65,7 @@ def _get_running_widget():
         subsystem    = unreal.get_editor_subsystem(unreal.EditorUtilitySubsystem)
         widget_asset = unreal.find_object(None, WIDGET_OBJECT_PATH)
         if not widget_asset:
-            widget_asset = unreal.load_object(unreal.EditorUtilityWidgetBlueprint, WIDGET_OBJECT_PATH)
+            widget_asset = unreal.load_object(None, WIDGET_OBJECT_PATH)
         if not widget_asset:
             return None
         return subsystem.find_utility_widget_from_blueprint(widget_asset)
@@ -163,7 +163,7 @@ def _get_or_create_foliage_type(mesh_path):
     Return a FoliageType_InstancedStaticMesh for the given StaticMesh path.
     Creates and saves the asset under AUTO_FT_FOLDER if it doesn't exist yet.
     """
-    mesh = unreal.load_object(unreal.StaticMesh, mesh_path)
+    mesh = unreal.load_asset(mesh_path)
     if mesh is None:
         print(f"[Foliage]   ⚠  StaticMesh not found: {mesh_path}")
         return None
@@ -178,7 +178,7 @@ def _get_or_create_foliage_type(mesh_path):
     if existing:
         return existing
     if unreal.EditorAssetLibrary.does_asset_exist(ft_path):
-        return unreal.load_object(unreal.FoliageType_InstancedStaticMesh, ft_obj)
+        return unreal.load_object(None, ft_obj)
 
     # Create new
     asset_tools = unreal.AssetToolsHelpers.get_asset_tools()
