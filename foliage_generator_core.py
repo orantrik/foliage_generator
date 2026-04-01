@@ -427,7 +427,7 @@ def generate_foliage():
                 s   = rng.uniform(*rules["scale"])
                 yaw = rng.uniform(0.0, 360.0)
                 loc = unreal.Vector(cx, cy, cz)
-                rot = unreal.Rotator(0.0, yaw, 0.0)
+                rot = unreal.Rotator(pitch=0.0, yaw=yaw, roll=0.0)
 
                 placed = editor_subs.spawn_actor_from_class(unreal.StaticMeshActor, loc, rot)
                 if placed is None:
