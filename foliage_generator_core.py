@@ -383,14 +383,18 @@ def _find_matching_actors(material_path):
 
 def _trace(world, x, y, ref_z, z_lo, z_hi, offset=20000):
     """
-    Trace straight down from above ref_z against whatever has collision
-    (landscape, roads, etc.).  Returns hit Z if the result lands within
-    [z_lo, z_hi], else None.
+    Trace straight down from above ref_z (always hits landscape/roads).
 
-    We rely on the XY already being constrained to a matching actor's bounding
-    box footprint (from _grid_points_for_actor), so any hit within the actor's
-    Z band is on the correct surface.  No material filter needed — and no
-    async collision-cooking required.
+    Three outcomes:
+      • Hit Z within [z_lo, z_hi]  → surface is at ground level; use hit Z.
+      • Hit Z below z_lo            → mesh is elevated above the landscape;
+                                      fall back to ref_z (actor top-Z) so
+                                      plants land on the raised surface, not
+                                      the ground underneath it.
+      • No hit at all               → point is outside any geometry; skip.
+
+    XY is already constrained to the actor's footprint by _grid_points_for_actor,
+    so no material filter is needed.
     """
     hit = unreal.SystemLibrary.line_trace_single(
         world,
@@ -400,12 +404,16 @@ def _trace(world, x, y, ref_z, z_lo, z_hi, offset=20000):
         False, [], unreal.DrawDebugTrace.NONE, True,
     )
     t = hit.to_tuple()
-    if not t[0]:                   # bBlockingHit
+    if not t[0]:                        # bBlockingHit — nothing below
         return None
-    loc = t[4]                     # Location
-    if not (z_lo <= loc.z <= z_hi):
-        return None
-    return loc, t[7]               # Location, ImpactNormal
+    loc = t[4]
+    if z_lo <= loc.z <= z_hi:
+        # Ground-level surface: landscape sits within actor Z extents
+        return loc, t[7]
+    if loc.z < z_lo:
+        # Elevated surface: landscape is far below — place on actor top-Z
+        return unreal.Vector(x, y, ref_z), unreal.Vector(0.0, 0.0, 1.0)
+    return None                         # Hit above z_hi — unexpected, skip
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  POINT GENERATION  — XY grid from actor bounding box
