@@ -378,76 +378,19 @@ def _find_matching_actors(material_path):
     return actors
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  COLLISION HELPERS  — temporarily enable complex collision so traces hit mesh
+#  TRACE  — landscape snap with per-point actor-bounds Z filter
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _enable_complex_collision(matching):
+def _trace(world, x, y, ref_z, z_lo, z_hi, offset=20000):
     """
-    For each matching actor, save and then set:
-      • component CollisionEnabled → QueryOnly  (so traces can hit it)
-      • mesh body_setup flag       → CTF_USE_COMPLEX_AS_SIMPLE  (use render mesh)
-    Returns a restore list passed back to _restore_complex_collision().
-    Does NOT save assets — changes are in-memory only for this session.
-    """
-    restore = []
-    for actor in matching:
-        smc = actor.get_component_by_class(unreal.StaticMeshComponent)
-        if not smc:
-            restore.append(None)
-            continue
+    Trace straight down from above ref_z against whatever has collision
+    (landscape, roads, etc.).  Returns hit Z if the result lands within
+    [z_lo, z_hi], else None.
 
-        # ── component collision ───────────────────────────────────────────────
-        old_ce = None
-        try:
-            old_ce = smc.get_collision_enabled()
-            smc.set_collision_enabled(unreal.CollisionEnabled.QUERY_ONLY)
-        except Exception:
-            old_ce = None
-
-        # ── mesh body_setup ───────────────────────────────────────────────────
-        body     = None
-        old_flag = None
-        try:
-            mesh = smc.get_editor_property("static_mesh")
-            if mesh:
-                body     = mesh.get_editor_property("body_setup")
-                old_flag = body.get_editor_property("collision_trace_flag")
-                body.set_editor_property(
-                    "collision_trace_flag",
-                    unreal.CollisionTraceFlag.CTF_USE_COMPLEX_AS_SIMPLE,
-                )
-        except Exception:
-            body = None
-
-        restore.append((smc, old_ce, body, old_flag))
-    return restore
-
-
-def _restore_complex_collision(restore):
-    for item in restore:
-        if item is None:
-            continue
-        smc, old_ce, body, old_flag = item
-        try:
-            if old_ce is not None:
-                smc.set_collision_enabled(old_ce)
-        except Exception:
-            pass
-        try:
-            if body is not None and old_flag is not None:
-                body.set_editor_property("collision_trace_flag", old_flag)
-        except Exception:
-            pass
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  TRACE  — hits the actual selected surface, rejects everything else
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _trace(world, x, y, ref_z, material_path, offset=20000):
-    """
-    Trace straight down from above ref_z.
-    Accepts the hit only if the struck component uses material_path.
-    Returns (Location, ImpactNormal) or None.
+    We rely on the XY already being constrained to a matching actor's bounding
+    box footprint (from _grid_points_for_actor), so any hit within the actor's
+    Z band is on the correct surface.  No material filter needed — and no
+    async collision-cooking required.
     """
     hit = unreal.SystemLibrary.line_trace_single(
         world,
@@ -457,12 +400,12 @@ def _trace(world, x, y, ref_z, material_path, offset=20000):
         False, [], unreal.DrawDebugTrace.NONE, True,
     )
     t = hit.to_tuple()
-    if not t[0]:        # bBlockingHit
+    if not t[0]:                   # bBlockingHit
         return None
-    comp = t[10]        # Component
-    if comp is None or not _material_matches(comp, material_path):
+    loc = t[4]                     # Location
+    if not (z_lo <= loc.z <= z_hi):
         return None
-    return t[4], t[7]  # Location, ImpactNormal
+    return loc, t[7]               # Location, ImpactNormal
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  POINT GENERATION  — XY grid from actor bounding box
@@ -470,13 +413,19 @@ def _trace(world, x, y, ref_z, material_path, offset=20000):
 
 def _grid_points_for_actor(actor, spacing, jitter, rng):
     """
-    Return list of (x, y, ref_z) candidate positions across the
-    top face of this actor's AABB.  ref_z is used as the trace midpoint.
+    Return list of (x, y, ref_z, z_lo, z_hi) candidate positions across the
+    top face of this actor's AABB.
+    z_lo / z_hi are the per-actor Z bounds passed to _trace() so only
+    hits at the correct height are accepted (filters underground/elevated
+    actors that share the same material).
     """
     origin, extent = actor.get_actor_bounds(False)
     x0, x1 = origin.x - extent.x, origin.x + extent.x
     y0, y1 = origin.y - extent.y, origin.y + extent.y
     top_z  = origin.z + extent.z
+    # Accept landscape hits within ±200 cm of the actor's Z extents
+    z_lo   = origin.z - extent.z - 200
+    z_hi   = origin.z + extent.z + 200
 
     cols = max(1, int((x1 - x0) / spacing))
     rows = max(1, int((y1 - y0) / spacing))
@@ -493,6 +442,8 @@ def _grid_points_for_actor(actor, spacing, jitter, rng):
                 x + rng.uniform(-jr, jr),
                 y + rng.uniform(-jr, jr),
                 top_z,
+                z_lo,
+                z_hi,
             ))
             y += spacing
         x += spacing
@@ -548,18 +499,6 @@ def generate_foliage():
         return
     print(f"[Foliage] {len(matching)} matching surface actor(s).")
 
-    # Compute valid Z range from the top faces of all matching actors.
-    # Rejects trace hits that land on buried/underground surfaces that happen
-    # to share the same material (common with shared master materials).
-    actor_tops = []
-    for a in matching:
-        o, e = a.get_actor_bounds(False)
-        actor_tops.append(o.z + e.z)
-    z_median  = sorted(actor_tops)[len(actor_tops) // 2]
-    z_min_ok  = z_median - 800    # allow 8 m below median top
-    z_max_ok  = z_median + 2000   # allow 20 m above (sloped terrain)
-    print(f"[Foliage] Valid Z range: {z_min_ok:.0f} – {z_max_ok:.0f} (median top {z_median:.0f})")
-
     # ── 3. Group mesh list by category, apply active_categories filter ────────
     by_category = {}
     for sm_path, category in mesh_list:
@@ -593,51 +532,43 @@ def generate_foliage():
     total = 0
     lines = [f"Material: {material_path}", f"Seed: {seed}", ""]
 
-    # ── 4. Enable mesh collision so traces can hit the selected surfaces ──────
-    collision_restore = _enable_complex_collision(matching)
+    # ── 4. Place foliage ──────────────────────────────────────────────────────
+    with unreal.ScopedEditorTransaction("Foliage Generator"):
+        for category, paths in sorted(by_category.items()):
+            rules = CATEGORY_RULES.get(category, CATEGORY_RULES["MEDIUM_TREE"])
 
-    try:
-        with unreal.ScopedEditorTransaction("Foliage Generator"):
-            for category, paths in sorted(by_category.items()):
-                rules = CATEGORY_RULES.get(category, CATEGORY_RULES["MEDIUM_TREE"])
+            # Pre-load all meshes for this category
+            loaded = {}
+            for sm_path in paths:
+                m = unreal.load_asset(sm_path)
+                if m is not None:
+                    loaded[sm_path] = m
+            valid_paths = list(loaded.keys())
+            if not valid_paths:
+                lines.append(f"⚠ {category} — no meshes loaded, skipped")
+                continue
 
-                # Pre-load all meshes for this category
-                loaded = {}
-                for sm_path in paths:
-                    m = unreal.load_asset(sm_path)
-                    if m is not None:
-                        loaded[sm_path] = m
-                valid_paths = list(loaded.keys())
-                if not valid_paths:
-                    lines.append(f"⚠ {category} — no meshes loaded, skipped")
+            # Collect candidate points across all matching surfaces.
+            # Each point carries per-actor Z bounds so _trace() can
+            # reject landscape hits that belong to the wrong surface.
+            all_points = []
+            for actor in matching:
+                all_points.extend(
+                    _grid_points_for_actor(actor, rules["spacing"], rules["jitter"], rng)
+                )
+
+            # Cap total per category
+            if len(all_points) > MAX_POINTS_PER_CATEGORY:
+                rng.shuffle(all_points)
+                all_points = all_points[:MAX_POINTS_PER_CATEGORY]
+
+            count  = 0
+            misses = 0
+            for (cx, cy, cz, z_lo, z_hi) in all_points:
+                result = _trace(world, cx, cy, cz, z_lo, z_hi)
+                if result is None:
+                    misses += 1
                     continue
-
-                # Collect candidate XY points across all matching surfaces
-                all_points = []
-                for actor in matching:
-                    all_points.extend(
-                        _grid_points_for_actor(actor, rules["spacing"], rules["jitter"], rng)
-                    )
-
-                # Cap total per category
-                if len(all_points) > MAX_POINTS_PER_CATEGORY:
-                    rng.shuffle(all_points)
-                    all_points = all_points[:MAX_POINTS_PER_CATEGORY]
-
-                count  = 0
-                misses = 0
-                for (cx, cy, cz) in all_points:
-                    # Trace hits only the selected material surface — rejects
-                    # landscape, dirt, paths, and anything outside the mesh footprint
-                    result = _trace(world, cx, cy, cz, material_path)
-                    if result is None:
-                        misses += 1
-                        continue
-                    # Reject hits whose Z is implausibly far from the surface cluster
-                    # (shared master material can match buried/underground actors)
-                    if not (z_min_ok <= result[0].z <= z_max_ok):
-                        misses += 1
-                        continue
 
                     loc, normal = result
                     sm_path = rng.choice(valid_paths)
@@ -693,10 +624,6 @@ def generate_foliage():
                         line += f"  ({misses} skipped: no hit / out of Z range)"
                     print(f"[Foliage]   {line}")
                 lines.append(line)
-
-    finally:
-        # Always restore collision settings, even if an error occurs mid-run
-        _restore_complex_collision(collision_restore)
 
     elapsed = time.time() - t0
     summary = f"\n✓ Done — {total} instances in {elapsed:.1f}s"
