@@ -130,6 +130,57 @@ def _load_config():
     return None
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  CONTENT BROWSER SELECTION  — quick plant picker using native CB thumbnails
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _guess_category(name):
+    """Fallback category from mesh/asset name when not in config."""
+    n = name.upper()
+    if any(w in n for w in ["SHRUB", "BUSH", "HEDGE", "GRASS", "IVY",
+                             "PLANT", "FERN", "FLOWER", "WEED", "REED"]):
+        return "SHRUB"
+    if any(w in n for w in ["SMALL", "SAPLING", "YOUNG"]):
+        return "SMALL_TREE"
+    if any(w in n for w in ["LARGE", "BIG", "TALL", "GIANT"]):
+        return "LARGE_TREE"
+    return "MEDIUM_TREE"
+
+
+def _mesh_list_from_cb_selection(cat_lookup):
+    """
+    Return [(sm_path, category)] for every StaticMesh or
+    FoliageType_InstancedStaticMesh currently selected in the Content Browser.
+    cat_lookup: dict {sm_path: category} from the saved JSON config.
+    Returns [] if nothing relevant is selected.
+    """
+    try:
+        selected = unreal.EditorUtilityLibrary.get_selected_assets()
+    except Exception:
+        return []
+
+    result = []
+    for asset in selected:
+        sm_path = None
+        name    = ""
+        if isinstance(asset, unreal.StaticMesh):
+            p = asset.get_path_name()
+            sm_path = p.rsplit(".", 1)[0] if "." in p else p
+            name    = asset.get_name()
+        elif isinstance(asset, unreal.FoliageType_InstancedStaticMesh):
+            try:
+                mesh = asset.get_editor_property("mesh")
+                if mesh:
+                    p       = mesh.get_path_name()
+                    sm_path = p.rsplit(".", 1)[0] if "." in p else p
+                    name    = mesh.get_name()
+            except Exception:
+                pass
+        if sm_path:
+            category = cat_lookup.get(sm_path, _guess_category(name))
+            result.append((sm_path, category))
+    return result
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  MESH SCANNING
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -207,9 +258,30 @@ def _read_widget_config(widget):
 
     if not mesh_list:
         saved = _load_config()
+
+        # ── Priority 1: Content Browser selection ─────────────────────────────
+        # Build category lookup from saved JSON so CB-selected meshes inherit
+        # their previously assigned categories.
+        cat_lookup = {}
         if saved and saved.get("mesh_list"):
+            for row in saved["mesh_list"]:
+                cat_lookup[row[0]] = row[1]
+
+        cb_list = _mesh_list_from_cb_selection(cat_lookup)
+        if cb_list:
+            mesh_list = cb_list
+            print(f"[Foliage] Using {len(mesh_list)} mesh(es) from Content Browser selection")
+            for path, cat in mesh_list[:5]:
+                print(f"[Foliage]   {path.split('/')[-1]}  [{cat}]")
+            if len(mesh_list) > 5:
+                print(f"[Foliage]   … and {len(mesh_list) - 5} more")
+
+        # ── Priority 2: Saved JSON config ──────────────────────────────────────
+        elif saved and saved.get("mesh_list"):
             mesh_list = [(row[0], row[1]) for row in saved["mesh_list"]]
             print(f"[Foliage] FoliageConfig empty — using {len(mesh_list)} mesh(es) from foliage_config.json")
+
+        # ── Priority 3: First run — scan and save ──────────────────────────────
         else:
             _set_status(f"Scanning {mesh_folder} for meshes...", widget)
             paths = _scan_static_meshes(mesh_folder)
@@ -236,7 +308,13 @@ def _read_widget_config(widget):
             _set_status(
                 f"Found {len(paths)} mesh(es). Config saved to:\n{CONFIG_FILE}\n\n"
                 f"First 8:\n  {preview}\n\n"
-                "Edit foliage_config.json: delete non-foliage rows, set categories.\n"
+                "── QUICK WAY ──────────────────────────────\n"
+                "In the Content Browser, Ctrl+click the\n"
+                "tree/shrub meshes you want, then click\n"
+                "▶ Generate Foliage — no JSON editing needed.\n\n"
+                "── FULL CONFIG ─────────────────────────────\n"
+                "Edit foliage_config.json: remove non-foliage\n"
+                "rows, set LARGE_TREE / MEDIUM_TREE / SHRUB.\n"
                 "Then click ▶ Generate Foliage again.",
                 widget
             )

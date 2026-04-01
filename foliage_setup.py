@@ -133,20 +133,29 @@ print("""
 
   Right-click EUW_FoliageGenerator → Run Editor Utility Widget
 
-  First run:
-    • Set MeshFolderInput to the folder holding your tree/shrub
-      meshes — e.g. "/Game/Trees/" or keep "/Game/" for all
+  Selecting plants — two ways:
+
+  QUICK (thumbnails, no JSON):
+    1. Open the Content Browser
+    2. Navigate to your tree/shrub meshes
+    3. Ctrl+click to select the ones you want
+       (works with StaticMesh or FoliageType assets)
+    4. Click ▶ Generate Foliage — done.
+       Categories are inferred from foliage_config.json
+       if a mesh was scanned before, otherwise guessed
+       from the asset name (Bush/Grass→SHRUB, etc.)
+
+  FULL CONFIG (all meshes, all categories):
+    • Set MeshFolderInput to your tree/shrub folder
     • Leave FoliageConfig empty, click ▶ Generate Foliage
-    • StatusLog auto-fills FoliageConfig with every StaticMesh
-      found in that folder (one per line), all set to MEDIUM_TREE
-    • FoliageType assets are created automatically under
-      /Game/FoliageGenerator/AutoTypes/ — no manual step needed
-    • Edit category tags if needed:
+    • Script scans and saves foliage_config.json
+    • Edit the JSON: remove non-foliage rows, set tags:
         LARGE_TREE  (10-15 m spacing)
         MEDIUM_TREE ( 7-10 m spacing)
         SMALL_TREE  ( 4-7  m spacing)
         SHRUB       (1.5-3 m spacing)
-    • Delete lines for meshes you don't want placed
     • Click ▶ Generate Foliage again to place instances
+    • Optionally add "active_categories": ["MEDIUM_TREE"]
+      to the JSON to limit which categories run
 """)
 print("═" * W + "\n")
