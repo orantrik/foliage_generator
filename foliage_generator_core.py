@@ -298,33 +298,100 @@ def _find_matching_actors(material_path):
     return actors
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  POINT GENERATION  — grid XY from bounding box, Z snapped to ground
+#  COLLISION HELPERS  — temporarily enable complex collision so traces hit mesh
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _snap_to_ground(world, x, y, ref_z, offset=20000):
+def _enable_complex_collision(matching):
     """
-    Trace straight down from (x, y, ref_z + offset).
-    Returns the hit Z (any surface — landscape or mesh), or ref_z on miss.
-    No material filter: we just want actual ground height.
+    For each matching actor, save and then set:
+      • component CollisionEnabled → QueryOnly  (so traces can hit it)
+      • mesh body_setup flag       → CTF_USE_COMPLEX_AS_SIMPLE  (use render mesh)
+    Returns a restore list passed back to _restore_complex_collision().
+    Does NOT save assets — changes are in-memory only for this session.
     """
-    start = unreal.Vector(x, y, ref_z + offset)
-    end   = unreal.Vector(x, y, ref_z - offset)
-    hit   = unreal.SystemLibrary.line_trace_single(
-        world, start, end,
+    restore = []
+    for actor in matching:
+        smc = actor.get_component_by_class(unreal.StaticMeshComponent)
+        if not smc:
+            restore.append(None)
+            continue
+
+        # ── component collision ───────────────────────────────────────────────
+        old_ce = None
+        try:
+            old_ce = smc.get_collision_enabled()
+            smc.set_collision_enabled(unreal.CollisionEnabled.QUERY_ONLY)
+        except Exception:
+            old_ce = None
+
+        # ── mesh body_setup ───────────────────────────────────────────────────
+        body     = None
+        old_flag = None
+        try:
+            mesh = smc.get_editor_property("static_mesh")
+            if mesh:
+                body     = mesh.get_editor_property("body_setup")
+                old_flag = body.get_editor_property("collision_trace_flag")
+                body.set_editor_property(
+                    "collision_trace_flag",
+                    unreal.CollisionTraceFlag.CTF_USE_COMPLEX_AS_SIMPLE,
+                )
+        except Exception:
+            body = None
+
+        restore.append((smc, old_ce, body, old_flag))
+    return restore
+
+
+def _restore_complex_collision(restore):
+    for item in restore:
+        if item is None:
+            continue
+        smc, old_ce, body, old_flag = item
+        try:
+            if old_ce is not None:
+                smc.set_collision_enabled(old_ce)
+        except Exception:
+            pass
+        try:
+            if body is not None and old_flag is not None:
+                body.set_editor_property("collision_trace_flag", old_flag)
+        except Exception:
+            pass
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  TRACE  — hits the actual selected surface, rejects everything else
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _trace(world, x, y, ref_z, material_path, offset=20000):
+    """
+    Trace straight down from above ref_z.
+    Accepts the hit only if the struck component uses material_path.
+    Returns (Location, ImpactNormal) or None.
+    """
+    hit = unreal.SystemLibrary.line_trace_single(
+        world,
+        unreal.Vector(x, y, ref_z + offset),
+        unreal.Vector(x, y, ref_z - offset),
         unreal.TraceTypeQuery.TRACE_TYPE_QUERY1,
         False, [], unreal.DrawDebugTrace.NONE, True,
     )
     t = hit.to_tuple()
-    if t[0]:          # bBlockingHit
-        return t[4].z  # Location.z
-    return ref_z
+    if not t[0]:        # bBlockingHit
+        return None
+    comp = t[10]        # Component
+    if comp is None or not _material_matches(comp, material_path):
+        return None
+    return t[4], t[7]  # Location, ImpactNormal
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  POINT GENERATION  — XY grid from actor bounding box
+# ══════════════════════════════════════════════════════════════════════════════
 
 def _grid_points_for_actor(actor, spacing, jitter, rng):
     """
     Return list of (x, y, ref_z) candidate positions across the
-    top face of this actor's AABB.  Z is the bounding-box top — caller
-    passes it to _snap_to_ground to get the real terrain height.
+    top face of this actor's AABB.  ref_z is used as the trace midpoint.
     """
     origin, extent = actor.get_actor_bounds(False)
     x0, x1 = origin.x - extent.x, origin.x + extent.x
@@ -410,60 +477,74 @@ def generate_foliage():
     total = 0
     lines = [f"Material: {material_path}", f"Seed: {seed}", ""]
 
-    # ── 4. Place foliage ──────────────────────────────────────────────────────
-    with unreal.ScopedEditorTransaction("Foliage Generator"):
-        for category, paths in sorted(by_category.items()):
-            rules = CATEGORY_RULES.get(category, CATEGORY_RULES["MEDIUM_TREE"])
+    # ── 4. Enable mesh collision so traces can hit the selected surfaces ──────
+    collision_restore = _enable_complex_collision(matching)
 
-            # Pre-load all meshes for this category
-            loaded = {}
-            for sm_path in paths:
-                m = unreal.load_asset(sm_path)
-                if m is not None:
-                    loaded[sm_path] = m
-            valid_paths = list(loaded.keys())
-            if not valid_paths:
-                lines.append(f"⚠ {category} — no meshes loaded, skipped")
-                continue
+    try:
+        with unreal.ScopedEditorTransaction("Foliage Generator"):
+            for category, paths in sorted(by_category.items()):
+                rules = CATEGORY_RULES.get(category, CATEGORY_RULES["MEDIUM_TREE"])
 
-            # Collect candidate (x, y, z) points across all matching surfaces
-            all_points = []
-            for actor in matching:
-                all_points.extend(
-                    _grid_points_for_actor(actor, rules["spacing"], rules["jitter"], rng)
-                )
-
-            # Cap total per category
-            if len(all_points) > MAX_POINTS_PER_CATEGORY:
-                rng.shuffle(all_points)
-                all_points = all_points[:MAX_POINTS_PER_CATEGORY]
-
-            count = 0
-            for (cx, cy, cz) in all_points:
-                sm_path  = rng.choice(valid_paths)
-                mesh     = loaded[sm_path]
-                ground_z = _snap_to_ground(world, cx, cy, cz)
-
-                s   = rng.uniform(*rules["scale"])
-                yaw = rng.uniform(0.0, 360.0)
-                loc = unreal.Vector(cx, cy, ground_z)
-                rot = unreal.Rotator(pitch=0.0, yaw=yaw, roll=0.0)
-
-                placed = editor_subs.spawn_actor_from_class(unreal.StaticMeshActor, loc, rot)
-                if placed is None:
+                # Pre-load all meshes for this category
+                loaded = {}
+                for sm_path in paths:
+                    m = unreal.load_asset(sm_path)
+                    if m is not None:
+                        loaded[sm_path] = m
+                valid_paths = list(loaded.keys())
+                if not valid_paths:
+                    lines.append(f"⚠ {category} — no meshes loaded, skipped")
                     continue
 
-                smc = placed.get_component_by_class(unreal.StaticMeshComponent)
-                if smc is not None:
-                    smc.set_editor_property("static_mesh", mesh)
+                # Collect candidate XY points across all matching surfaces
+                all_points = []
+                for actor in matching:
+                    all_points.extend(
+                        _grid_points_for_actor(actor, rules["spacing"], rules["jitter"], rng)
+                    )
 
-                placed.set_actor_scale3d(unreal.Vector(s, s, s))
-                count += 1
+                # Cap total per category
+                if len(all_points) > MAX_POINTS_PER_CATEGORY:
+                    rng.shuffle(all_points)
+                    all_points = all_points[:MAX_POINTS_PER_CATEGORY]
 
-            total += count
-            line = f"✓ {category} ({len(valid_paths)} meshes) → {count} instances"
-            print(f"[Foliage]   {line}")
-            lines.append(line)
+                count = 0
+                for (cx, cy, cz) in all_points:
+                    # Trace hits only the selected material surface — rejects
+                    # landscape, dirt, paths, and anything outside the mesh footprint
+                    result = _trace(world, cx, cy, cz, material_path)
+                    if result is None:
+                        continue
+
+                    loc, normal = result
+                    sm_path = rng.choice(valid_paths)
+                    mesh    = loaded[sm_path]
+                    s       = rng.uniform(*rules["scale"])
+                    yaw     = rng.uniform(0.0, 360.0)
+
+                    placed = editor_subs.spawn_actor_from_class(
+                        unreal.StaticMeshActor,
+                        unreal.Vector(loc.x, loc.y, loc.z),
+                        unreal.Rotator(pitch=0.0, yaw=yaw, roll=0.0),
+                    )
+                    if placed is None:
+                        continue
+
+                    placed_smc = placed.get_component_by_class(unreal.StaticMeshComponent)
+                    if placed_smc is not None:
+                        placed_smc.set_editor_property("static_mesh", mesh)
+
+                    placed.set_actor_scale3d(unreal.Vector(s, s, s))
+                    count += 1
+
+                total += count
+                line = f"✓ {category} ({len(valid_paths)} meshes) → {count} instances"
+                print(f"[Foliage]   {line}")
+                lines.append(line)
+
+    finally:
+        # Always restore collision settings, even if an error occurs mid-run
+        _restore_complex_collision(collision_restore)
 
     elapsed = time.time() - t0
     summary = f"\n✓ Done — {total} instances in {elapsed:.1f}s"
