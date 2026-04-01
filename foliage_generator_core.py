@@ -379,10 +379,7 @@ def _candidate_points(origin, extent, spacing, jitter, rng):
     return pts
 
 
-_hit_attrs_printed = False
-
 def _trace(world, x, y, top_z, material_path):
-    global _hit_attrs_printed
     hit = unreal.SystemLibrary.line_trace_single(
         world,
         unreal.Vector(x, y, top_z + TRACE_HEIGHT_OFFSET),
@@ -390,19 +387,14 @@ def _trace(world, x, y, top_z, material_path):
         unreal.TraceTypeQuery.TRACE_TYPE_QUERY1,
         False, [], unreal.DrawDebugTrace.NONE, True,
     )
-    if not _hit_attrs_printed:
-        _hit_attrs_printed = True
-        attrs = [a for a in dir(hit) if not a.startswith("_")]
-        print(f"[Foliage] HitResult attrs: {attrs}")
-    # Try multiple attribute names used across UE5 Python versions
-    is_hit   = getattr(hit, "blocking_hit",   None) or getattr(hit, "bBlockingHit", None)
-    comp     = getattr(hit, "hit_component",  None) or getattr(hit, "component",    None)
-    location = getattr(hit, "location",       None) or getattr(hit, "impact_point", None)
-    normal   = getattr(hit, "impact_normal",  None) or getattr(hit, "normal",       None)
-    if not is_hit or comp is None:
+    # HitResult fields are accessed via get_editor_property() in this UE5 binding
+    if not hit.get_editor_property("bBlockingHit"):
         return None
-    if not _material_matches(comp, material_path):
+    comp = hit.get_editor_property("Component")
+    if comp is None or not _material_matches(comp, material_path):
         return None
+    location = hit.get_editor_property("Location")
+    normal   = hit.get_editor_property("ImpactNormal")
     return location, normal
 
 
