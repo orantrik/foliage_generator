@@ -468,10 +468,34 @@ def generate_foliage():
         return
     print(f"[Foliage] {len(matching)} matching surface actor(s).")
 
-    # ── 3. Group mesh list by category ────────────────────────────────────────
+    # ── 3. Group mesh list by category, apply active_categories filter ────────
     by_category = {}
     for sm_path, category in mesh_list:
         by_category.setdefault(category, []).append(sm_path)
+
+    # active_categories: set in foliage_config.json as
+    #   "active_categories": ["MEDIUM_TREE", "SHRUB"]
+    # Leave empty list or omit to run all categories.
+    # Also checked in widget field "CategoriesInput" (comma-separated).
+    active_cats = set()
+    if cfg.get("active_categories"):
+        active_cats = {c.strip().upper() for c in cfg["active_categories"] if c.strip()}
+    if widget:
+        raw = _widget_text(widget, "CategoriesInput", "")
+        if raw:
+            active_cats = {c.strip().upper() for c in raw.split(",") if c.strip()}
+    if active_cats:
+        by_category = {k: v for k, v in by_category.items() if k in active_cats}
+        print(f"[Foliage] Category filter: {', '.join(sorted(active_cats))}")
+
+    if not by_category:
+        _set_status(
+            "⚠  No categories to place.\n"
+            "Check active_categories in foliage_config.json or CategoriesInput widget field.\n"
+            f"Available: {', '.join(sorted(CATEGORY_RULES.keys()))}",
+            widget
+        )
+        return
 
     editor_subs = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
     total = 0
@@ -535,6 +559,25 @@ def generate_foliage():
                         placed_smc.set_editor_property("static_mesh", mesh)
 
                     placed.set_actor_scale3d(unreal.Vector(s, s, s))
+
+                    # Snap bottom of mesh bounds to surface Z.
+                    # Many tree/shrub assets have their pivot above or below the
+                    # visible mesh base, which causes floating or burying.
+                    # After setting the mesh + scale, get the real world bounds and
+                    # shift the actor so its bottom face sits exactly on loc.z.
+                    try:
+                        b_origin, b_extent = placed.get_actor_bounds(False)
+                        if b_extent.z > 1.0:
+                            bottom_z = b_origin.z - b_extent.z
+                            adjustment = loc.z - bottom_z
+                            if abs(adjustment) > 0.5:
+                                placed.set_actor_location(
+                                    unreal.Vector(loc.x, loc.y, loc.z + adjustment),
+                                    False, False,
+                                )
+                    except Exception:
+                        pass
+
                     count += 1
 
                 total += count
