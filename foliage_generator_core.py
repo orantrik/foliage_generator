@@ -379,7 +379,10 @@ def _candidate_points(origin, extent, spacing, jitter, rng):
     return pts
 
 
+_hit_tuple_printed = False
+
 def _trace(world, x, y, top_z, material_path):
+    global _hit_tuple_printed
     hit = unreal.SystemLibrary.line_trace_single(
         world,
         unreal.Vector(x, y, top_z + TRACE_HEIGHT_OFFSET),
@@ -387,15 +390,20 @@ def _trace(world, x, y, top_z, material_path):
         unreal.TraceTypeQuery.TRACE_TYPE_QUERY1,
         False, [], unreal.DrawDebugTrace.NONE, True,
     )
-    # HitResult fields are accessed via get_editor_property() in this UE5 binding
-    if not hit.get_editor_property("bBlockingHit"):
+    t = hit.to_tuple()
+    if not _hit_tuple_printed:
+        _hit_tuple_printed = True
+        print(f"[Foliage] HitResult.to_tuple() = {t}")
+    # to_tuple() field order for FHitResult:
+    # [0] bBlockingHit, [1] bStartPenetrating, [2] Time, [3] Distance,
+    # [4] Location, [5] ImpactPoint, [6] Normal, [7] ImpactNormal,
+    # [8] PhysMaterial, [9] Actor, [10] Component, [11] BoneName, [12] MyBoneName
+    if not t[0]:          # bBlockingHit
         return None
-    comp = hit.get_editor_property("Component")
+    comp = t[10]          # Component
     if comp is None or not _material_matches(comp, material_path):
         return None
-    location = hit.get_editor_property("Location")
-    normal   = hit.get_editor_property("ImpactNormal")
-    return location, normal
+    return t[4], t[7]     # Location, ImpactNormal
 
 
 def _make_transform(loc, normal, scale_range, align_normal, rng):
