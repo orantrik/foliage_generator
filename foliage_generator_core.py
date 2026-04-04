@@ -173,6 +173,32 @@ def _load_config():
 #  CONTENT BROWSER SELECTION  — quick plant picker using native CB thumbnails
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _extract_static_mesh(asset):
+    """
+    Return a raw StaticMesh from *asset*.
+
+    Handles two cases:
+      1. asset is already a StaticMesh → returned as-is.
+      2. asset is a FoliageType_InstancedStaticMesh (or any other wrapper that
+         exposes a 'mesh' property) → the inner StaticMesh is extracted and
+         returned.
+
+    Returns None if the asset cannot be resolved to a StaticMesh.
+    """
+    if asset is None:
+        return None
+    if isinstance(asset, unreal.StaticMesh):
+        return asset
+    # Try to unwrap FoliageType_InstancedStaticMesh (and similar wrappers)
+    try:
+        inner = asset.get_editor_property("mesh")
+        if isinstance(inner, unreal.StaticMesh):
+            return inner
+    except Exception:
+        pass
+    return None
+
+
 def _canopy_diameter_cm(mesh):
     """
     Measure the horizontal (XY) canopy footprint of a StaticMesh asset in cm.
@@ -1443,6 +1469,10 @@ def generate_foliage():
         if m is None:
             print(f"[Foliage]   ⚠ Could not load: {sm_path.split('/')[-1]}")
             continue
+        m = _extract_static_mesh(m)          # unwrap FoliageType if needed
+        if m is None:
+            print(f"[Foliage]   ⚠ Not a StaticMesh (or FoliageType with no mesh): {sm_path.split('/')[-1]}")
+            continue
         loaded_meshes[sm_path] = m
 
         d = _canopy_diameter_cm(m)
@@ -1505,11 +1535,15 @@ def generate_foliage():
     if gd_enabled and gd_sequence_paths:
         for p in gd_sequence_paths:
             m = unreal.load_asset(p)
-            if m is not None:
-                border_mesh_map[p] = m
-                border_sequence.append(p)
-            else:
+            if m is None:
                 print(f"[Foliage] ⚠ Border sequence: could not load '{p.split('/')[-1]}'")
+                continue
+            m = _extract_static_mesh(m)      # unwrap FoliageType if needed
+            if m is None:
+                print(f"[Foliage] ⚠ Border sequence: not a StaticMesh: '{p.split('/')[-1]}'")
+                continue
+            border_mesh_map[p] = m
+            border_sequence.append(p)
         if border_sequence:
             print(f"[Foliage] Garden design: border rows ON — "
                   f"{len(border_sequence)}-step sequence, "
