@@ -1864,22 +1864,20 @@ def generate_foliage():
                     _queue(mesh, sm_path, loc, yaw, s, z_offset_cm)
                     placed_by_cat[cat] = placed_by_cat.get(cat, 0) + 1
 
-        # ── Batch-submit all queued transforms to UE Foliage system ──────────
-        # Strategy A: InstancedFoliageActor.add_instances() — native foliage,
-        #   shows in Foliage Mode, supports paint/erase/density controls.
-        #   Works in UE5.4+; get_instanced_foliage_actor_for_current_level is
-        #   NOT exposed to Python so we locate the IFA via actor scan.
-        # Strategy B (fallback): HierarchicalInstancedStaticMeshComponent on a
-        #   dedicated container Actor — also GPU-instanced, organized in
-        #   Outliner as "Foliage_<MeshName>", but NOT in Foliage Mode palette.
+        # ── Batch-submit all queued transforms ───────────────────────────────
+        # Strategy A: InstancedFoliageActor.add_instances(ft, bUpdateUI, xforms)
+        #   — native foliage, visible & editable in Foliage Mode.
+        #   UE5 Python signature has 3 positional args: type, bool, transforms.
+        #   IFA is located via actor scan (static getter not exposed to Python).
+        # Strategy B (fallback): individual StaticMeshActors — guaranteed to
+        #   work on every UE5 version; visible and selectable in the viewport.
 
         # Get the editor world via the non-deprecated subsystem
         _ue_sub    = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem)
         _lvl_world = _ue_sub.get_editor_world()
         _actor_sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
 
-        # Find the level's InstancedFoliageActor (one per level, auto-created
-        # by UE when foliage is first added — we spawn one if absent)
+        # Find the level's InstancedFoliageActor (one per level)
         _ifa = None
         try:
             _ifa_list = unreal.GameplayStatics.get_all_actors_of_class(
@@ -1893,51 +1891,56 @@ def generate_foliage():
                     unreal.Rotator(0.0, 0.0, 0.0),
                 )
         except Exception as _e_ifa_find:
-            print(f"[Foliage] ⚠ IFA lookup failed ({_e_ifa_find}) — will use HISC fallback")
+            print(f"[Foliage] ⚠ IFA lookup failed ({_e_ifa_find}) — will use StaticMeshActor fallback")
+
+        _strategy_b_warned = False   # print the fallback notice only once
 
         for _sm_path, _xforms in _pending_xforms.items():
             _mesh = loaded_meshes.get(_sm_path) or border_mesh_map.get(_sm_path)
             if _mesh is None:
                 continue
             _mesh_lbl = _sm_path.split("/")[-1].split(".")[0]
-            _safe_lbl = "".join(c if (c.isalnum() or c == "_") else "_" for c in _mesh_lbl)
 
-            # ── Strategy A: IFA add_instances ─────────────────────────────
+            # ── Strategy A: IFA add_instances(ft, bUpdateUI, transforms) ──
             _used_ifa = False
             if _ifa is not None:
                 _ft = _get_foliage_type(_sm_path, _mesh)
                 if _ft is not None:
                     try:
-                        _ifa.add_instances(_ft, _xforms)
+                        # UE5 Python requires the bool 'bUpdateUI' as pos-2 arg
+                        _ifa.add_instances(_ft, False, _xforms)
                         _used_ifa = True
                         print(f"[Foliage]   ↳ {len(_xforms):5d} foliage instances "
                               f"(Foliage Mode) → {_mesh_lbl}")
                     except Exception as _e_add:
-                        print(f"[Foliage]   IFA.add_instances failed ({_e_add}) "
-                              f"— switching to HISC for {_mesh_lbl}")
+                        if not _strategy_b_warned:
+                            print(f"[Foliage]   IFA.add_instances unavailable in this UE build "
+                                  f"({_e_add})\n"
+                                  f"[Foliage]   Falling back to StaticMeshActor for all meshes.")
+                            _strategy_b_warned = True
 
-            # ── Strategy B: HISC container actor (fallback) ───────────────
+            # ── Strategy B: individual StaticMeshActors (always works) ────
             if not _used_ifa:
-                try:
-                    _cont = _actor_sub.spawn_actor_from_class(
-                        unreal.Actor,
-                        unreal.Vector(0.0, 0.0, 0.0),
-                        unreal.Rotator(0.0, 0.0, 0.0),
+                _n = 0
+                for _xf in _xforms:
+                    _t   = _xf.translation
+                    _q   = _xf.rotation
+                    # Extract yaw from pure-Z quaternion: yaw = 2*atan2(qz, qw)
+                    _yaw = math.degrees(2.0 * math.atan2(_q.z, _q.w))
+                    _s   = _xf.scale3d.x
+                    _a   = _actor_sub.spawn_actor_from_class(
+                        unreal.StaticMeshActor,
+                        unreal.Vector(_t.x, _t.y, _t.z),
+                        unreal.Rotator(0.0, _yaw, 0.0),
                     )
-                    _cont.set_actor_label(f"Foliage_{_safe_lbl}")
-                    _hisc = _cont.add_component_by_class(
-                        unreal.HierarchicalInstancedStaticMeshComponent,
-                        False,                 # bManualAttachment
-                        unreal.Transform(),    # RelativeTransform
-                        False,                 # bDeferredFinish
-                    )
-                    _hisc.set_editor_property("static_mesh", _mesh)
-                    for _xf in _xforms:
-                        _hisc.add_instance(_xf)
-                    print(f"[Foliage]   ↳ {len(_xforms):5d} HISC instances "
-                          f"(Outliner: Foliage_{_safe_lbl}) → {_mesh_lbl}")
-                except Exception as _e_hisc:
-                    print(f"[Foliage] ⚠ Both strategies failed for {_mesh_lbl}: {_e_hisc}")
+                    if _a is None:
+                        continue
+                    _smc = _a.get_component_by_class(unreal.StaticMeshComponent)
+                    if _smc is not None:
+                        _smc.set_editor_property("static_mesh", _mesh)
+                    _a.set_actor_scale3d(unreal.Vector(_s, _s, _s))
+                    _n += 1
+                print(f"[Foliage]   ↳ {_n:5d} StaticMeshActors → {_mesh_lbl}")
 
     # ── Placement diagnostics ─────────────────────────────────────────────────
     print(f"[Foliage] Points: {diag_gen} generated  "
