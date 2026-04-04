@@ -1685,7 +1685,9 @@ def generate_foliage():
 
     # ── Shared queue helper ───────────────────────────────────────────────────
     def _queue(mesh, sm_path, loc, yaw, scale_val, z_off):
-        """Queue one foliage instance transform; batch-submitted to IFA after loop."""
+        """Queue one placement as a raw (x,y,z,yaw,scale) tuple.
+        No Quat math here — built only at submit time so there is zero
+        roundtrip error and Z-up is guaranteed for the fallback path."""
         nonlocal total, diag_placed
         s = scale_val
         # Snap pivot bottom to surface: subtract local bbox.min.z (scaled)
@@ -1698,15 +1700,9 @@ def generate_foliage():
         except Exception:
             pass
         final_z += z_off
-        # Build transform (yaw-only rotation around Z)
-        yaw_rad  = math.radians(yaw)
-        half     = yaw_rad * 0.5
-        quat     = unreal.Quat(0.0, 0.0, math.sin(half), math.cos(half))
-        xf       = unreal.Transform()
-        xf.translation = unreal.Vector(loc.x, loc.y, final_z)
-        xf.rotation    = quat
-        xf.scale3d     = unreal.Vector(s, s, s)
-        _pending_xforms.setdefault(sm_path, []).append(xf)
+        _pending_xforms.setdefault(sm_path, []).append(
+            (loc.x, loc.y, final_z, yaw, s)
+        )
         diag_placed += 1
         total += 1
 
@@ -1864,20 +1860,22 @@ def generate_foliage():
                     _queue(mesh, sm_path, loc, yaw, s, z_offset_cm)
                     placed_by_cat[cat] = placed_by_cat.get(cat, 0) + 1
 
-        # ── Batch-submit all queued transforms ───────────────────────────────
-        # Strategy A: InstancedFoliageActor.add_instances(ft, bUpdateUI, xforms)
-        #   — native foliage, visible & editable in Foliage Mode.
-        #   UE5 Python signature has 3 positional args: type, bool, transforms.
-        #   IFA is located via actor scan (static getter not exposed to Python).
-        # Strategy B (fallback): individual StaticMeshActors — guaranteed to
-        #   work on every UE5 version; visible and selectable in the viewport.
+        # ── Batch-submit all queued placements ───────────────────────────────
+        # _pending_xforms stores raw (x, y, z, yaw_deg, scale) tuples.
+        #
+        # Strategy A  — InstancedFoliageActor.add_instances()
+        #   Tries three known UE5 Python binding signatures (version-dependent).
+        #   On success → plants appear in Foliage Mode palette.
+        #
+        # Strategy B  — individual StaticMeshActors (guaranteed fallback)
+        #   Uses Rotator(pitch=0, yaw=yaw, roll=0) directly — no Quat math,
+        #   so Z-up is guaranteed and there is zero rotation corruption.
 
-        # Get the editor world via the non-deprecated subsystem
         _ue_sub    = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem)
         _lvl_world = _ue_sub.get_editor_world()
         _actor_sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
 
-        # Find the level's InstancedFoliageActor (one per level)
+        # Locate (or spawn) the level's InstancedFoliageActor
         _ifa = None
         try:
             _ifa_list = unreal.GameplayStatics.get_all_actors_of_class(
@@ -1890,55 +1888,97 @@ def generate_foliage():
                     unreal.Vector(0.0, 0.0, 0.0),
                     unreal.Rotator(0.0, 0.0, 0.0),
                 )
-        except Exception as _e_ifa_find:
-            print(f"[Foliage] ⚠ IFA lookup failed ({_e_ifa_find}) — will use StaticMeshActor fallback")
+        except Exception as _e_ifa:
+            print(f"[Foliage] ⚠ IFA lookup failed ({_e_ifa}) — using StaticMeshActor fallback")
 
-        _strategy_b_warned = False   # print the fallback notice only once
+        # Probe add_instances signature once and cache which variant works
+        _ifa_sig = None   # None = unknown, False = none worked
 
-        for _sm_path, _xforms in _pending_xforms.items():
+        def _try_add_instances(ft, xf_arr):
+            """Try every known UE5 Python signature for IFA.add_instances().
+            Returns True on first success, False if all fail."""
+            nonlocal _ifa_sig
+            if _ifa is None:
+                return False
+            if _ifa_sig is False:
+                return False
+
+            variants = [
+                # (label, call)
+                ("(ft, xforms, True)",  lambda: _ifa.add_instances(ft, xf_arr, True)),
+                ("(ft, xforms, False)", lambda: _ifa.add_instances(ft, xf_arr, False)),
+                ("(ft, xforms)",        lambda: _ifa.add_instances(ft, xf_arr)),
+                ("(ft, True, xforms)",  lambda: _ifa.add_instances(ft, True,  xf_arr)),
+                ("(ft, False, xforms)", lambda: _ifa.add_instances(ft, False, xf_arr)),
+            ]
+            # If we already found a working variant, go straight to it
+            if _ifa_sig is not None:
+                _, call = variants[_ifa_sig]
+                try:
+                    call()
+                    return True
+                except Exception:
+                    _ifa_sig = False
+                    return False
+
+            for i, (lbl, call) in enumerate(variants):
+                try:
+                    call()
+                    _ifa_sig = i
+                    print(f"[Foliage]   IFA.add_instances working signature: {lbl}")
+                    return True
+                except Exception:
+                    pass
+            _ifa_sig = False
+            return False
+
+        _fallback_warned = False
+
+        for _sm_path, _raw_pts in _pending_xforms.items():
             _mesh = loaded_meshes.get(_sm_path) or border_mesh_map.get(_sm_path)
             if _mesh is None:
                 continue
             _mesh_lbl = _sm_path.split("/")[-1].split(".")[0]
 
-            # ── Strategy A: IFA add_instances(ft, bUpdateUI, transforms) ──
+            # ── Strategy A: IFA foliage instances ─────────────────────────
             _used_ifa = False
-            if _ifa is not None:
+            if _ifa is not None and _ifa_sig is not False:
                 _ft = _get_foliage_type(_sm_path, _mesh)
                 if _ft is not None:
-                    try:
-                        # UE5 Python requires the bool 'bUpdateUI' as pos-2 arg
-                        _ifa.add_instances(_ft, False, _xforms)
+                    # Build unreal.Array[Transform] — yaw-only, Z-up
+                    _xf_arr = unreal.Array(unreal.Transform)
+                    for (_px, _py, _pz, _pyaw, _ps) in _raw_pts:
+                        _h  = math.radians(_pyaw) * 0.5
+                        _q  = unreal.Quat(0.0, 0.0, math.sin(_h), math.cos(_h))
+                        _xf = unreal.Transform()
+                        _xf.translation = unreal.Vector(_px, _py, _pz)
+                        _xf.rotation    = _q
+                        _xf.scale3d     = unreal.Vector(_ps, _ps, _ps)
+                        _xf_arr.append(_xf)
+                    if _try_add_instances(_ft, _xf_arr):
                         _used_ifa = True
-                        print(f"[Foliage]   ↳ {len(_xforms):5d} foliage instances "
+                        print(f"[Foliage]   ↳ {len(_raw_pts):5d} foliage instances "
                               f"(Foliage Mode) → {_mesh_lbl}")
-                    except Exception as _e_add:
-                        if not _strategy_b_warned:
-                            print(f"[Foliage]   IFA.add_instances unavailable in this UE build "
-                                  f"({_e_add})\n"
-                                  f"[Foliage]   Falling back to StaticMeshActor for all meshes.")
-                            _strategy_b_warned = True
 
-            # ── Strategy B: individual StaticMeshActors (always works) ────
+            # ── Strategy B: StaticMeshActors — Rotator, no Quat math ──────
             if not _used_ifa:
+                if not _fallback_warned:
+                    print(f"[Foliage]   IFA unavailable — placing as StaticMeshActors "
+                          f"(select all + Foliage Mode > Convert to Foliage if needed)")
+                    _fallback_warned = True
                 _n = 0
-                for _xf in _xforms:
-                    _t   = _xf.translation
-                    _q   = _xf.rotation
-                    # Extract yaw from pure-Z quaternion: yaw = 2*atan2(qz, qw)
-                    _yaw = math.degrees(2.0 * math.atan2(_q.z, _q.w))
-                    _s   = _xf.scale3d.x
-                    _a   = _actor_sub.spawn_actor_from_class(
+                for (_px, _py, _pz, _pyaw, _ps) in _raw_pts:
+                    _a = _actor_sub.spawn_actor_from_class(
                         unreal.StaticMeshActor,
-                        unreal.Vector(_t.x, _t.y, _t.z),
-                        unreal.Rotator(0.0, _yaw, 0.0),
+                        unreal.Vector(_px, _py, _pz),
+                        unreal.Rotator(0.0, _pyaw, 0.0),  # pitch=0, yaw, roll=0 → Z up
                     )
                     if _a is None:
                         continue
                     _smc = _a.get_component_by_class(unreal.StaticMeshComponent)
                     if _smc is not None:
                         _smc.set_editor_property("static_mesh", _mesh)
-                    _a.set_actor_scale3d(unreal.Vector(_s, _s, _s))
+                    _a.set_actor_scale3d(unreal.Vector(_ps, _ps, _ps))
                     _n += 1
                 print(f"[Foliage]   ↳ {_n:5d} StaticMeshActors → {_mesh_lbl}")
 
