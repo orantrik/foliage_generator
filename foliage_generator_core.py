@@ -870,13 +870,24 @@ def _cell_patches_for_surface(actor, comp, world, material_path):
     z_hi   = top_z + 200.0
     W, H   = x1 - x0, y1 - y0
 
-    # Small actor (≤ 1.5 cells): one patch only — probe the centre
+    # Small actor (≤ 1.5 cells): one patch — probe centre + 4 quarter-points so
+    # narrow slivers whose centre lands on a non-grass edge still get confirmed.
     if W <= CELL_SIZE_CM * 1.5 and H <= CELL_SIZE_CM * 1.5:
-        hit = _trace(world, (x0 + x1) * 0.5, (y0 + y1) * 0.5,
-                     top_z, z_lo, z_hi,
-                     source_actor=actor, material_path=material_path)
-        if hit is not None:
-            yield (x0, x1, y0, y1, top_z, z_lo, z_hi, actor)
+        cx = (x0 + x1) * 0.5
+        cy = (y0 + y1) * 0.5
+        probe_pts = [
+            (cx,                cy               ),   # centre
+            (cx - W * 0.25,     cy               ),   # left
+            (cx + W * 0.25,     cy               ),   # right
+            (cx,                cy - H * 0.25    ),   # bottom
+            (cx,                cy + H * 0.25    ),   # top
+        ]
+        for px, py in probe_pts:
+            hit = _trace(world, px, py, top_z, z_lo, z_hi,
+                         source_actor=actor, material_path=material_path)
+            if hit is not None:
+                yield (x0, x1, y0, y1, top_z, z_lo, z_hi, actor)
+                break
         return
 
     # Large actor: subdivide into uniform cells
@@ -1580,7 +1591,6 @@ def generate_foliage():
     if building_clearance > 0:
         print(f"[Foliage] Building clearance: {building_clearance/100:.1f} m from any wall")
 
-    editor_subs = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
     total             = 0
     skipped_canopy    = 0
     skipped_clearance = 0
@@ -1588,6 +1598,52 @@ def generate_foliage():
     placed_by_cat   = {}   # category → count
     # Per-patch diagnostics: generated / trace-miss / canopy-skip / clearance-skip / placed
     diag_gen = diag_trace = diag_canopy = diag_clr = diag_placed = 0
+
+    # ── Foliage system setup ──────────────────────────────────────────────────
+    # All placements go into UE's native Foliage system (InstancedFoliageActor)
+    # so they appear in Foliage Mode and can be painted/erased there.
+    # Each unique StaticMesh gets one auto-created FoliageType_InstancedStaticMesh
+    # asset stored under /Game/FoliageGenerator/AutoFoliageTypes/.
+    _ft_asset_tools = unreal.AssetToolsHelpers.get_asset_tools()
+    _ft_cache       = {}   # sm_path → FoliageType_InstancedStaticMesh asset (or None)
+    _pending_xforms = {}   # sm_path → list[unreal.Transform]
+
+    def _get_foliage_type(sm_path, mesh):
+        """Return (creating if needed) a FoliageType_InstancedStaticMesh for mesh."""
+        if sm_path in _ft_cache:
+            return _ft_cache[sm_path]
+        mesh_name  = sm_path.split("/")[-1].split(".")[0]
+        safe_name  = "".join(c if (c.isalnum() or c == "_") else "_" for c in mesh_name)
+        ft_name    = f"FT_Auto_{safe_name}"
+        ft_pkg     = "/Game/FoliageGenerator/AutoFoliageTypes"
+        ft_path    = f"{ft_pkg}/{ft_name}.{ft_name}"
+        ft = None
+        # Reuse existing asset from a previous run
+        if unreal.EditorAssetLibrary.does_asset_exist(ft_path):
+            ft = unreal.load_asset(ft_path)
+        # Create if still absent
+        if ft is None:
+            try:
+                factory = unreal.FoliageType_InstancedStaticMeshFactory()
+                ft = _ft_asset_tools.create_asset(ft_name, ft_pkg, None, factory)
+            except Exception as e:
+                try:
+                    # Fallback: some UE5 builds expose a different factory name
+                    ft = _ft_asset_tools.create_asset(
+                        ft_name, ft_pkg,
+                        unreal.FoliageType_InstancedStaticMesh, None
+                    )
+                except Exception as e2:
+                    print(f"[Foliage] ⚠ Cannot create FoliageType for {mesh_name}: {e2}")
+        if ft is not None:
+            try:
+                ft.set_editor_property("mesh", mesh)
+                unreal.EditorAssetLibrary.save_asset(ft.get_path_name())
+            except Exception as e:
+                print(f"[Foliage] ⚠ Could not assign mesh to FoliageType {ft_name}: {e}")
+                ft = None
+        _ft_cache[sm_path] = ft
+        return ft
 
     # ── 4. Place foliage — all categories per patch ───────────────────────────
     #
@@ -1627,22 +1683,12 @@ def generate_foliage():
     }
     PLACEMENT_ORDER = ["LARGE_TREE", "MEDIUM_TREE", "SMALL_TREE", "SHRUB"]
 
-    # ── Shared spawn helper ───────────────────────────────────────────────────
-    def _spawn(mesh, loc, yaw, scale_val, z_off, src_actor):
-        """Spawn one StaticMeshActor, snap bottom to surface, apply Z offset."""
+    # ── Shared queue helper ───────────────────────────────────────────────────
+    def _queue(mesh, sm_path, loc, yaw, scale_val, z_off):
+        """Queue one foliage instance transform; batch-submitted to IFA after loop."""
         nonlocal total, diag_placed
         s = scale_val
-        a = editor_subs.spawn_actor_from_class(
-            unreal.StaticMeshActor,
-            unreal.Vector(loc.x, loc.y, loc.z),
-            unreal.Rotator(pitch=0.0, yaw=yaw, roll=0.0),
-        )
-        if a is None:
-            return
-        smc = a.get_component_by_class(unreal.StaticMeshComponent)
-        if smc is not None:
-            smc.set_editor_property("static_mesh", mesh)
-        a.set_actor_scale3d(unreal.Vector(s, s, s))
+        # Snap pivot bottom to surface: subtract local bbox.min.z (scaled)
         final_z = loc.z
         try:
             bb = mesh.get_bounding_box()
@@ -1652,7 +1698,15 @@ def generate_foliage():
         except Exception:
             pass
         final_z += z_off
-        a.set_actor_location(unreal.Vector(loc.x, loc.y, final_z), False, False)
+        # Build transform (yaw-only rotation around Z)
+        yaw_rad  = math.radians(yaw)
+        half     = yaw_rad * 0.5
+        quat     = unreal.Quat(0.0, 0.0, math.sin(half), math.cos(half))
+        xf       = unreal.Transform()
+        xf.translation = unreal.Vector(loc.x, loc.y, final_z)
+        xf.rotation    = quat
+        xf.scale3d     = unreal.Vector(s, s, s)
+        _pending_xforms.setdefault(sm_path, []).append(xf)
         diag_placed += 1
         total += 1
 
@@ -1704,7 +1758,7 @@ def generate_foliage():
                     # Orderly look: tight scale (±5%) and minimal yaw variation (±8°)
                     s   = rng.uniform(0.95, 1.05)
                     yaw = rng.uniform(-8.0, 8.0)
-                    _spawn(mesh, loc, yaw, s, 0.0, bactor)
+                    _queue(mesh, sm_path, loc, yaw, s, 0.0)
                     border_placed += 1
                 continue   # border cells do NOT also get interior planting
 
@@ -1807,8 +1861,28 @@ def generate_foliage():
                     mesh    = loaded_meshes[sm_path]
                     s       = rng.uniform(*scale)
                     yaw     = rng.uniform(0.0, 360.0)
-                    _spawn(mesh, loc, yaw, s, z_offset_cm, src_actor)
+                    _queue(mesh, sm_path, loc, yaw, s, z_offset_cm)
                     placed_by_cat[cat] = placed_by_cat.get(cat, 0) + 1
+
+        # ── Batch-submit all queued transforms to UE Foliage system ──────────
+        # One add_instances() call per unique mesh — orders of magnitude faster
+        # than spawning individual StaticMeshActors, and the result appears in
+        # Foliage Mode so you can paint/erase/adjust density there.
+        _lvl_world = unreal.EditorLevelLibrary.get_editor_world()
+        _ifa = unreal.InstancedFoliageActor.get_instanced_foliage_actor_for_current_level(
+            _lvl_world, True   # True = create IFA if the level doesn't have one yet
+        )
+        for _sm_path, _xforms in _pending_xforms.items():
+            _mesh = loaded_meshes.get(_sm_path) or border_mesh_map.get(_sm_path)
+            if _mesh is None:
+                continue
+            _ft = _get_foliage_type(_sm_path, _mesh)
+            if _ft is None:
+                print(f"[Foliage] ⚠ Skipped {_sm_path.split('/')[-1]} — "
+                      f"could not resolve FoliageType")
+                continue
+            _ifa.add_instances(_ft, _xforms)
+            print(f"[Foliage]   ↳ {len(_xforms):5d} foliage instances → {_ft.get_name()}")
 
     # ── Placement diagnostics ─────────────────────────────────────────────────
     print(f"[Foliage] Points: {diag_gen} generated  "
