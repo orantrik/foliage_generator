@@ -64,18 +64,11 @@ def _set_widget_text(parent, name, text):
 
 # ── Material resolution ───────────────────────────────────────────────────────
 
-def _resolve_base_material_path(mat):
-    """Walk material instance chain → return clean /Game/... path."""
-    current = mat
-    for _ in range(10):
-        if isinstance(current, unreal.MaterialInstance):
-            parent = current.get_editor_property("parent")
-            if parent is not None:
-                current = parent
-                continue
-        break
-
-    path = current.get_path_name()
+def _clean_material_path(mat):
+    """Return the clean /Game/... path of this specific material (no chain walking).
+    Using the instance directly lets the generator distinguish MI_TennisGreen
+    from MI_Grass even though both share the same master material."""
+    path = mat.get_path_name()
     if ":" in path:
         path = path.split(":")[0]
     if "." in path:
@@ -108,8 +101,8 @@ def pick_material_from_selection():
         print(f"[Pick Material] ⚠  No material on '{actor.get_actor_label()}'.")
         return
 
-    # 3. Resolve base path
-    mat_path = _resolve_base_material_path(mat)
+    # 3. Get the instance path directly (not the master)
+    mat_path = _clean_material_path(mat)
     print(f"[Pick Material] Actor   : {actor.get_actor_label()}")
     print(f"[Pick Material] Material: {mat_path}")
 
