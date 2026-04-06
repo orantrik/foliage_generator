@@ -1950,146 +1950,10 @@ void SFoliageGeneratorWidget::RunGenerate()
         CombinedBounds += FBox(Orig - Ext, Orig + Ext);
         TargetActorSet.Add(A);
     }
-    const float TraceTop = CombinedBounds.Max.Z + 500.f;
-    const float TraceBot = CombinedBounds.Min.Z - 100.f;
-
-    // ── Grid sizing — cap at 100k cells so large scenes stay fast ─────────────
-    const float SceneW = CombinedBounds.GetSize().X;
-    const float SceneH = CombinedBounds.GetSize().Y;
-    {
-        constexpr float BaseCell = 100.f;
-        constexpr int32 MaxCells = 100000;
-        const float Raw = (SceneW / BaseCell) * (SceneH / BaseCell);
-        // CellSize auto-scales up for large scenes, min 100 cm
-        // declared here so the lambdas below capture it
-    }
-    const float CellSize = FMath::Max(100.f,
-        100.f * FMath::Sqrt(FMath::Max(1.f,
-            (SceneW / 100.f) * (SceneH / 100.f) / 100000.f)));
-
-    const float GMinX = CombinedBounds.Min.X;
-    const float GMinY = CombinedBounds.Min.Y;
-    const int32 GW    = FMath::CeilToInt(SceneW / CellSize) + 1;
-    const int32 GH    = FMath::CeilToInt(SceneH / CellSize) + 1;
-    const int32 GTot  = GW * GH;
-
-    AppendLog(FString::Printf(
-        TEXT("Sampling %d x %d grid (cell=%.0fcm, %d cells total)..."),
-        GW, GH, CellSize, GTot));
-    FSlateApplication::Get().PumpMessages();
-
-    // ── Step 1: Sparse Occupancy Set ─────────────────────────────────────────
-    // Uses TSet<FIntPoint> instead of a flat bool array so that only cells
-    // that actually contain mesh footprints consume memory.  Accurate for any
-    // scene size at constant 100 cm resolution.
-    TSet<FIntPoint> OccupiedCells;
-    OccupiedCells.Reserve(GTot);
-    {
-        struct FFootprint2D { float MinX, MinY, MaxX, MaxY; };
-        TArray<FFootprint2D> Footprints;
-        Footprints.Reserve(TargetActors.Num());
-        for (AStaticMeshActor* A : TargetActors)
-        {
-            FVector Orig, Ext;
-            A->GetActorBounds(false, Orig, Ext);
-            const float Margin = CellSize * 0.5f;
-            Footprints.Add({ (float)(Orig.X - Ext.X) + Margin, (float)(Orig.Y - Ext.Y) + Margin,
-                             (float)(Orig.X + Ext.X) - Margin, (float)(Orig.Y + Ext.Y) - Margin });
-        }
-
-        for (int32 iy = 0; iy < GH; ++iy)
-        {
-            if (iy % 20 == 0) FSlateApplication::Get().PumpMessages();
-            for (int32 ix = 0; ix < GW; ++ix)
-            {
-                const float CX = GMinX + (ix + 0.5f) * CellSize;
-                const float CY = GMinY + (iy + 0.5f) * CellSize;
-                for (const FFootprint2D& FP : Footprints)
-                {
-                    if (CX >= FP.MinX && CX <= FP.MaxX &&
-                        CY >= FP.MinY && CY <= FP.MaxY)
-                    {
-                        OccupiedCells.Add(FIntPoint(ix, iy));
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    // ── Step 2: Sparse Distance Transform (multi-source BFS) ─────────────────
-    // Seeds BFS from occupied cells that border a non-occupied neighbour
-    // (boundary cells, distance = 0).  Interior cells are filled by wavefront
-    // expansion.  Only occupied cells consume map entries.
-    TMap<FIntPoint, float> DistMap;
-    DistMap.Reserve(OccupiedCells.Num());
-    {
-        TArray<FIntPoint> BFSQueue;
-        BFSQueue.Reserve(OccupiedCells.Num());
-
-        // Seed: occupied cells with at least one non-occupied 4-neighbour
-        for (const FIntPoint& Cell : OccupiedCells)
-        {
-            const FIntPoint Nb[4] = {
-                {Cell.X-1, Cell.Y}, {Cell.X+1, Cell.Y},
-                {Cell.X, Cell.Y-1}, {Cell.X, Cell.Y+1}
-            };
-            bool bIsBoundary = false;
-            for (const FIntPoint& N : Nb)
-                if (!OccupiedCells.Contains(N)) { bIsBoundary = true; break; }
-
-            if (bIsBoundary)
-            {
-                DistMap.Add(Cell, 0.f);
-                BFSQueue.Add(Cell);
-            }
-        }
-
-        // Wavefront expansion: each step costs CellSize cm
-        for (int32 qi = 0; qi < BFSQueue.Num(); ++qi)
-        {
-            const FIntPoint& Cur     = BFSQueue[qi];
-            const float      NewDist = DistMap[Cur] + CellSize;
-            const FIntPoint  Nb[4]   = {
-                {Cur.X-1, Cur.Y}, {Cur.X+1, Cur.Y},
-                {Cur.X, Cur.Y-1}, {Cur.X, Cur.Y+1}
-            };
-            for (const FIntPoint& N : Nb)
-            {
-                if (!OccupiedCells.Contains(N)) continue;
-                float& ExistDist = DistMap.FindOrAdd(N, FLT_MAX);
-                if (NewDist < ExistDist)
-                {
-                    ExistDist = NewDist;
-                    BFSQueue.Add(N);
-                }
-            }
-        }
-    }
-
-    if (bPatchSizeFilter)
-    {
-        int32 PC[4] = {};
-        for (const FIntPoint& Cell : OccupiedCells)
-        {
-            const float* DP = DistMap.Find(Cell);
-            if (!DP) continue;
-            const float D = *DP;
-            if      (D >= PatchThresholdLarge  * 0.5f) ++PC[0];
-            else if (D >= PatchThresholdMedium * 0.5f) ++PC[1];
-            else if (D >= PatchThresholdSmall  * 0.5f) ++PC[2];
-            else                                        ++PC[3];
-        }
-        AppendLog(FString::Printf(
-            TEXT("Patch width distribution (cells):  Large %d | Medium %d | Small %d | Shrub %d"),
-            PC[0], PC[1], PC[2], PC[3]));
-    }
-
-    // ── Selection-wide patch category ────────────────────────────────────────
-    // When the user explicitly chose actors in the viewport the whole selection
-    // is treated as ONE patch whose size = combined-bounds longest dimension.
-    // This avoids per-tile BFS scores of 0 that mis-classify a 10 m courtyard
-    // made of small individual tiles as "Shrub" (each tile is a boundary cell).
+    // ── Patch category ────────────────────────────────────────────────────────
+    // For explicit viewport selection the whole selection is one patch sized
+    // by the combined-bounds longest dimension.  For material-scan mode each
+    // actor is classified independently from its own bounds.
     EFoliageCategory SelectionPatchCat = EFoliageCategory::Shrub;
     if (bUseSelection)
     {
@@ -2107,28 +1971,16 @@ void SFoliageGeneratorWidget::RunGenerate()
             LongestDim));
     }
 
-    // O(1) lookup: world XY → patch category using sparse structures.
-    // For explicit viewport selections the whole selection is one patch
-    // (SelectionPatchCat); BFS distance is not meaningful for small tiles.
-    auto GetPatchAt = [&](float WX, float WY) -> TOptional<EFoliageCategory>
+    // Returns the patch category for a target actor (O(1), no grid needed).
+    auto GetActorPatchCat = [&](AStaticMeshActor* Actor) -> EFoliageCategory
     {
-        const FIntPoint Cell(
-            FMath::FloorToInt((WX - GMinX) / CellSize),
-            FMath::FloorToInt((WY - GMinY) / CellSize));
-        if (bUseSelection)
-        {
-            // For explicit selection: any hit point on a target actor is valid.
-            // Skip OccupiedCells lookup — small tiles may have empty occupancy
-            // due to grid-alignment margin, but bFoundTarget already confirms
-            // we are on a target surface.
-            return SelectionPatchCat;
-        }
-        if (!OccupiedCells.Contains(Cell)) return {};
-        const float* DP = DistMap.Find(Cell);
-        const float  D  = DP ? *DP : 0.f;
-        if (D >= PatchThresholdLarge  * 0.5f) return EFoliageCategory::LargeTree;
-        if (D >= PatchThresholdMedium * 0.5f) return EFoliageCategory::MediumTree;
-        if (D >= PatchThresholdSmall  * 0.5f) return EFoliageCategory::SmallTree;
+        if (bUseSelection) return SelectionPatchCat;
+        FVector Orig, Ext;
+        Actor->GetActorBounds(false, Orig, Ext);
+        const float Longest = FMath::Max(Ext.X * 2.f, Ext.Y * 2.f);
+        if (Longest >= PatchThresholdLarge)  return EFoliageCategory::LargeTree;
+        if (Longest >= PatchThresholdMedium) return EFoliageCategory::MediumTree;
+        if (Longest >= PatchThresholdSmall)  return EFoliageCategory::SmallTree;
         return EFoliageCategory::Shrub;
     };
 
@@ -2216,7 +2068,6 @@ void SFoliageGeneratorWidget::RunGenerate()
         const float Spacing  = FMath::Max(Entry->OverrideSpacing,  10.f);
         const float ScaleMin = FMath::Max(Entry->OverrideScaleMin, 0.1f);
         const float ScaleMax = FMath::Max(Entry->OverrideScaleMax, ScaleMin);
-        const float Jitter   = GetRules(Entry->Category).Jitter * Spacing;
 
         // Register in Foliage Mode palette
         FFoliageInfo* FoliageInfo = nullptr;
@@ -2229,313 +2080,234 @@ void SFoliageGeneratorWidget::RunGenerate()
         }
 
         TArray<FFoliageInstance> Instances;
-        bool  bCapReached  = false;
-        int32 TraceCounter = 0;
-        int32 DbgCandidates=0, DbgNoSurface=0, DbgPatchReject=0, DbgSpearReject=0, DbgCanopyReject=0, DbgHashReject=0;
-        FCollisionQueryParams QP(NAME_None, /*bTraceComplex=*/true);
-        // Ignore the IFA so that foliage instances placed in previous
-        // generations (or earlier in this run) never intercept the trace.
-        QP.AddIgnoredActor(IFA);
+        bool  bCapReached = false;
+        int32 DbgCandidates=0, DbgPatchReject=0, DbgSpearReject=0, DbgCanopyReject=0, DbgHashReject=0;
 
-        // ── Grid walk — combined bounds + per-actor centre fallback ───────────
+        // ── Triangle-based placement (mirrors UE's built-in Fill tool) ────────
         //
-        // The previous per-actor AABB loop silently generated 0 candidates when
-        // a single tile was narrower than Spacing/2 (e.g. a 200 cm tile with
-        // 1100 cm large-tree spacing).  Fix: walk the COMBINED bounds at Spacing
-        // intervals so grid points are placed relative to the whole selection/
-        // scene extent.  Then add each actor centre as an explicit fallback so
-        // that tiles narrower than Spacing always get at least one candidate.
-        TSet<TPair<int32,int32>> VisitedGridKeys;
-        TArray<FVector2D> GridPoints;
+        // For each target actor we read LOD0 triangles directly from render
+        // data — this works on meshes with "No Collision" because it bypasses
+        // the physics system entirely.  Random points are generated inside each
+        // upward-facing triangle using barycentric coordinates, giving spatially
+        // uniform coverage that respects the exact mesh outline (no AABB leakage
+        // onto adjacent surfaces).
+        //
+        // Instance count per triangle ∝ area / Spacing² so density is uniform
+        // regardless of triangle tessellation.
+        const float Spacing2 = Spacing * Spacing;
 
-        // 1. Uniform grid across all target surfaces
-        for (float GX0 = (float)CombinedBounds.Min.X + Spacing * 0.5f;
-             GX0 <= (float)CombinedBounds.Max.X;
-             GX0 += Spacing)
-        {
-            for (float GY0 = (float)CombinedBounds.Min.Y + Spacing * 0.5f;
-                 GY0 <= (float)CombinedBounds.Max.Y;
-                 GY0 += Spacing)
-            {
-                const int32 KX = FMath::RoundToInt(GX0 / Spacing);
-                const int32 KY = FMath::RoundToInt(GY0 / Spacing);
-                if (!VisitedGridKeys.Contains({KX, KY}))
-                {
-                    VisitedGridKeys.Add({KX, KY});
-                    GridPoints.Add(FVector2D(GX0, GY0));
-                }
-            }
-        }
-
-        // 2. Actor-centre fallback — guarantees at least one candidate per
-        //    actor even when the actor is narrower than Spacing/2.
         for (AStaticMeshActor* TA : TargetActors)
         {
-            FVector Orig, Ext;
-            TA->GetActorBounds(false, Orig, Ext);
-            const int32 KX = FMath::RoundToInt((float)Orig.X / Spacing);
-            const int32 KY = FMath::RoundToInt((float)Orig.Y / Spacing);
-            if (!VisitedGridKeys.Contains({KX, KY}))
-            {
-                VisitedGridKeys.Add({KX, KY});
-                GridPoints.Add(FVector2D((float)Orig.X, (float)Orig.Y));
-            }
-        }
-
-        for (const FVector2D& GridPt : GridPoints)
-        {
             if (bCapReached || bUserCancelled) break;
-            if (Progress.ShouldCancel()) { bUserCancelled = true; break; }
-            if (Instances.Num() >= MaxInstancesPerType) { bCapReached = true; break; }
 
-            if (++TraceCounter % 500 == 0)
+            // ── Per-actor patch-size gate ──────────────────────────────────────
+            if (bPatchSizeFilter)
             {
-                FSlateApplication::Get().PumpMessages();
-                if (Progress.ShouldCancel()) { bUserCancelled = true; break; }
+                const EFoliageCategory ActorCat = GetActorPatchCat(TA);
+                bool bAllowed = false;
+                switch (ActorCat)
+                {
+                    case EFoliageCategory::LargeTree:  bAllowed = Entry->bAllowOnLargePatch;  break;
+                    case EFoliageCategory::MediumTree: bAllowed = Entry->bAllowOnMediumPatch; break;
+                    case EFoliageCategory::SmallTree:  bAllowed = Entry->bAllowOnSmallPatch;  break;
+                    default:                           bAllowed = Entry->bAllowOnShrubPatch;  break;
+                }
+                if (!bAllowed) { ++DbgPatchReject; continue; }
             }
 
-            const float GX = GridPt.X;
-            const float GY = GridPt.Y;
+            UStaticMeshComponent* SMC = TA->GetStaticMeshComponent();
+            if (!SMC) continue;
+            UStaticMesh* SM = SMC->GetStaticMesh();
+            if (!SM || !SM->HasValidRenderData()) continue;
 
-            // Jittered sample point
-            const float PX = GX + Rng.FRandRange(-Jitter, Jitter);
-            const float PY = GY + Rng.FRandRange(-Jitter, Jitter);
-            ++DbgCandidates;
+            FStaticMeshLODResources& LOD = SM->GetRenderData()->LODResources[0];
+            FPositionVertexBuffer&   PVB = LOD.VertexBuffers.PositionVertexBuffer;
+            const uint32             NV  = PVB.GetNumVertices();
+            if (NV == 0) continue;
 
-                // Downward trace — step past any non-target hits (invisible
-                // collision meshes, BSP proxies, etc.) until we land on an actor
-                // in TargetActorSet (the actual material surface) or run out of
-                // geometry.  Up to 8 passes handles any reasonable stack depth.
-                FHitResult Hit;
-                bool bFoundTarget = false;
-                FVector PassStart = FVector(PX, PY, TraceTop);
-                const FVector PassEnd = FVector(PX, PY, TraceBot);
-                for (int32 Pass = 0; Pass < 8 && !bFoundTarget; ++Pass)
+            TArray<uint32> Indices;
+            LOD.IndexBuffer.GetCopy(Indices);
+
+            const FTransform CompXform = SMC->GetComponentTransform();
+
+            for (int32 SecIdx = 0; SecIdx < LOD.Sections.Num(); ++SecIdx)
+            {
+                if (bCapReached || bUserCancelled) break;
+
+                const FStaticMeshSection& Sec = LOD.Sections[SecIdx];
+
+                // In material-scan mode only process sections that use TargetMat,
+                // so we don't place foliage on e.g. the wood planks of a multi-
+                // material mesh that also happens to have a grass slot.
+                if (!bUseSelection)
                 {
-                    if (!World->LineTraceSingleByChannel(Hit, PassStart, PassEnd, ECC_Visibility, QP))
-                        break;
-                    AStaticMeshActor* HA = Cast<AStaticMeshActor>(Hit.GetActor());
-                    if (HA && TargetActorSet.Contains(HA))
-                        bFoundTarget = true;
-                    else
-                        PassStart = Hit.Location - FVector(0.f, 0.f, 1.f); // step below this hit
+                    UMaterialInterface* SecMat = SMC->GetMaterial(Sec.MaterialIndex);
+                    if (!SecMat ||
+                        (SecMat != TargetMat && SecMat->GetPathName() != MaterialPath))
+                        continue;
                 }
 
-                // Fallback: arch-viz grass meshes often have "No Collision" at
-                // the asset level so no physics body is ever baked — the trace
-                // above finds nothing even after SetCollisionEnabled(QueryOnly).
-                // We recover by checking each target actor's AABB footprint and
-                // placing at the top face of its bounding box.  For flat planes
-                // this is exact; the actor's up-vector gives the correct normal.
-                if (!bFoundTarget)
-                {
-                    // Arch-viz meshes have no physics body — traces miss them.
-                    // Recover by firing a CPU ray against the raw render triangles
-                    // (accurate on slopes/hills).  Fall back to the AABB top face
-                    // when render data is unavailable or the mesh is too dense.
-                    // Only accepts if the RAW GRID CENTRE (GX,GY) was inside the
-                    // actor footprint — jitter-pushed points are clamped, but grid
-                    // centres that were outside are rejected entirely.
-                    for (AStaticMeshActor* TA : TargetActors)
-                    {
-                        FVector Orig, Ext;
-                        TA->GetActorBounds(false, Orig, Ext);
-                        const float FMinX = (float)(Orig.X - Ext.X);
-                        const float FMaxX = (float)(Orig.X + Ext.X);
-                        const float FMinY = (float)(Orig.Y - Ext.Y);
-                        const float FMaxY = (float)(Orig.Y + Ext.Y);
-                        if (GX < FMinX || GX > FMaxX || GY < FMinY || GY > FMaxY) continue;
+                const uint32 FirstIdx  = Sec.FirstIndex;
+                const uint32 TriCount  = Sec.NumTriangles;
 
-                        UStaticMeshComponent* SMC = TA->GetStaticMeshComponent();
-                        FVector RayHitLoc, RayHitNorm;
-                        if (SMC && RaycastMeshCPU(SMC, PX, PY, TraceTop, RayHitLoc, RayHitNorm))
+                for (uint32 TriIdx = 0; TriIdx < TriCount; ++TriIdx)
+                {
+                    if (bCapReached || bUserCancelled) break;
+                    if (TriIdx % 500 == 0)
+                    {
+                        FSlateApplication::Get().PumpMessages();
+                        if (Progress.ShouldCancel()) { bUserCancelled = true; break; }
+                    }
+
+                    const uint32 I0 = Indices[FirstIdx + TriIdx * 3 + 0];
+                    const uint32 I1 = Indices[FirstIdx + TriIdx * 3 + 1];
+                    const uint32 I2 = Indices[FirstIdx + TriIdx * 3 + 2];
+                    if (I0 >= NV || I1 >= NV || I2 >= NV) continue;
+
+                    // World-space vertices
+                    const FVector V0 = CompXform.TransformPosition(FVector(PVB.VertexPosition(I0)));
+                    const FVector V1 = CompXform.TransformPosition(FVector(PVB.VertexPosition(I1)));
+                    const FVector V2 = CompXform.TransformPosition(FVector(PVB.VertexPosition(I2)));
+
+                    const FVector Edge1 = V1 - V0;
+                    const FVector Edge2 = V2 - V0;
+                    const FVector CrossP = Edge1 ^ Edge2;  // magnitude = 2 × area
+
+                    // Ensure normal points upward; skip wall/downward triangles
+                    FVector TriNormal = CrossP.GetSafeNormal();
+                    if (TriNormal.Z < 0.f) TriNormal = -TriNormal;
+                    if (TriNormal.Z < 0.17f) continue;  // > ~80° from vertical
+
+                    const float Area = CrossP.Size() * 0.5f;
+                    if (Area < 1.f) continue;  // degenerate triangle
+
+                    // Expected instances for this triangle (area-proportional density)
+                    const float ExpF  = Area / Spacing2;
+                    int32       Count = FMath::FloorToInt(ExpF);
+                    if (Rng.FRandRange(0.f, 1.f) < FMath::Frac(ExpF)) ++Count;
+                    if (Count <= 0) continue;
+
+                    for (int32 k = 0; k < Count; ++k)
+                    {
+                        if (bCapReached || bUserCancelled) break;
+                        if (Instances.Num() >= MaxInstancesPerType)
+                        { bCapReached = true; break; }
+
+                        ++DbgCandidates;
+
+                        // Uniform random point inside triangle (parallelogram-fold method)
+                        float u = Rng.FRandRange(0.f, 1.f);
+                        float v = Rng.FRandRange(0.f, 1.f);
+                        if (u + v > 1.f) { u = 1.f - u; v = 1.f - v; }
+                        const FVector Pos = V0 + u * Edge1 + v * Edge2;
+
+                        // ── Spear collision ────────────────────────────────────
+                        if (bSpearCollision)
                         {
-                            // Accurate triangle intersection — correct Z on slopes
-                            Hit.Location     = RayHitLoc;
-                            Hit.Normal       = RayHitNorm;
-                            Hit.ImpactNormal = RayHitNorm;
+                            const FCategoryRules& R = GetRules(Entry->Category);
+                            float ActiveClearance = 0.f;
+                            switch (Entry->Category)
+                            {
+                                case EFoliageCategory::LargeTree:  ActiveClearance = ClearanceLargeTree;  break;
+                                case EFoliageCategory::MediumTree: ActiveClearance = ClearanceMediumTree; break;
+                                case EFoliageCategory::SmallTree:  ActiveClearance = ClearanceSmallTree;  break;
+                                case EFoliageCategory::Shrub:      ActiveClearance = ClearanceShrub;      break;
+                                case EFoliageCategory::Flower:     ActiveClearance = ClearanceFlower;     break;
+                                default:                           ActiveClearance = ClearanceShrub;      break;
+                            }
+                            float BaseSpearRadius = SpearRadiusShrub;
+                            switch (Entry->Category)
+                            {
+                                case EFoliageCategory::LargeTree:  BaseSpearRadius = SpearRadiusLarge;  break;
+                                case EFoliageCategory::MediumTree: BaseSpearRadius = SpearRadiusMedium; break;
+                                case EFoliageCategory::SmallTree:  BaseSpearRadius = SpearRadiusSmall;  break;
+                                case EFoliageCategory::Shrub:      BaseSpearRadius = SpearRadiusShrub;  break;
+                                case EFoliageCategory::Flower:     BaseSpearRadius = SpearRadiusFlower; break;
+                                default: break;
+                            }
+                            const float SpearRadius   = BaseSpearRadius + ActiveClearance;
+                            const float GroundSkip    = FMath::Clamp(R.SpearHalfHeight * 0.1f, 5.f, 100.f);
+                            const FVector SpearBottom = Pos + FVector(0.f, 0.f, GroundSkip);
+                            const FVector SpearTop    = Pos + FVector(0.f, 0.f, R.SpearHalfHeight * 2.f);
+
+                            FCollisionQueryParams SpearQP(NAME_None, false);
+                            for (AActor* Ignored : TargetActorSet) SpearQP.AddIgnoredActor(Ignored);
+                            SpearQP.AddIgnoredActor(IFA);
+                            for (const FScopedCollisionModifier::FSavedState& SC : CollisionGuard.Modifications)
+                                if (SC.SMC) SpearQP.AddIgnoredActor(SC.SMC->GetOwner());
+
+                            FHitResult SpearHit;
+                            if (World->SweepSingleByObjectType(
+                                    SpearHit, SpearBottom, SpearTop, FQuat::Identity,
+                                    FCollisionObjectQueryParams(ECollisionChannel::ECC_WorldStatic),
+                                    FCollisionShape::MakeSphere(SpearRadius), SpearQP))
+                            {
+                                bool bIsBuilding = true;
+                                if (IsValid(SpearHit.GetActor()))
+                                {
+                                    FVector HO, HExt;
+                                    SpearHit.GetActor()->GetActorBounds(false, HO, HExt);
+                                    if (HExt.Z < SpearFlatThreshold) bIsBuilding = false;
+                                }
+                                if (bIsBuilding) { ++DbgSpearReject; continue; }
+                            }
+                        }
+
+                        // ── Canopy check ───────────────────────────────────────
+                        if (bCanopyCheck)
+                        {
+                            FCollisionQueryParams CanopyQP(NAME_None, false);
+                            CanopyQP.AddIgnoredActor(IFA);
+                            for (const FScopedCollisionModifier::FSavedState& SC : CollisionGuard.Modifications)
+                                if (SC.SMC) CanopyQP.AddIgnoredActor(SC.SMC->GetOwner());
+
+                            FHitResult CanopyHit;
+                            if (World->LineTraceSingleByChannel(
+                                    CanopyHit,
+                                    Pos + FVector(0.f, 0.f, 10.f),
+                                    Pos + FVector(0.f, 0.f, Spacing * 2.f),
+                                    ECC_WorldStatic, CanopyQP))
+                            { ++DbgCanopyReject; continue; }
+                        }
+
+                        // ── Cross-foliage spacing ──────────────────────────────
+                        const float HalfSp = Spacing * 0.5f;
+                        if (IsTooCloseToAny(Pos.X, Pos.Y, HalfSp))
+                        { ++DbgHashReject; continue; }
+
+                        // ── Build instance ─────────────────────────────────────
+                        FFoliageInstance Inst;
+                        Inst.Location = Pos;
+
+                        const float Yaw = Rng.FRandRange(0.f, 360.f);
+                        if (GetRules(Entry->Category).bAlignToNormal)
+                        {
+                            // Tilt instance to follow the surface slope
+                            const FQuat   AlignQ   = FQuat::FindBetweenVectors(FVector::UpVector, TriNormal);
+                            const FRotator AlignRot = AlignQ.Rotator();
+                            Inst.Rotation = FRotator(AlignRot.Pitch, Yaw, AlignRot.Roll);
                         }
                         else
                         {
-                            // Flat-top AABB fallback (rectangular patches, no render data)
-                            const float CX = FMath::Clamp(PX, FMinX, FMaxX);
-                            const float CY = FMath::Clamp(PY, FMinY, FMaxY);
-                            const FVector N = TA->GetActorUpVector();
-                            Hit.Location     = FVector(CX, CY, Orig.Z + Ext.Z);
-                            Hit.Normal       = N;
-                            Hit.ImpactNormal = N;
+                            Inst.Rotation = FRotator(0.f, Yaw, 0.f);
                         }
-                        bFoundTarget = true;
-                        break;
+
+                        const float Scale = Rng.FRandRange(ScaleMin, ScaleMax);
+                        Inst.DrawScale3D  = FVector3f(Scale, Scale, Scale);
+
+                        RegisterPlacedPoint(Pos.X, Pos.Y, HalfSp);
+                        Instances.Add(MoveTemp(Inst));
                     }
                 }
-
-                if (!bFoundTarget) { ++DbgNoSurface; continue; }
-
-                // ── Hard boundary gate — OccupiedCells lookup ─────────────────
-                // The occupancy grid was built directly from mesh footprints, so
-                // it accurately represents the actual surface shape including
-                // L-shapes, courtyards, and concave outlines — unlike any bounding
-                // box approximation.  O(1) TSet lookup.
-                //
-                // SKIPPED for explicit viewport selection: bFoundTarget already
-                // confirms the hit is on a TargetActorSet member.  Small tiles
-                // (<200 cm) may have zero occupied cells due to the 50 cm margin
-                // in the footprint rasteriser, causing false rejections here.
-                if (!bUseSelection)
-                {
-                    const FIntPoint HitCell(
-                        FMath::FloorToInt((Hit.Location.X - GMinX) / CellSize),
-                        FMath::FloorToInt((Hit.Location.Y - GMinY) / CellSize));
-                    if (!OccupiedCells.Contains(HitCell))
-                    { ++DbgNoSurface; continue; }
-                }
-
-                // ── Patch allowance check (O(1) grid lookup) ─────────────────
-                if (bPatchSizeFilter)
-                {
-                    const TOptional<EFoliageCategory> PCat =
-                        GetPatchAt(Hit.Location.X, Hit.Location.Y);
-                    if (!PCat.IsSet()) { ++DbgPatchReject; continue; }
-                    bool bAllowed = false;
-                    switch (PCat.GetValue())
-                    {
-                        case EFoliageCategory::LargeTree:  bAllowed = Entry->bAllowOnLargePatch;  break;
-                        case EFoliageCategory::MediumTree: bAllowed = Entry->bAllowOnMediumPatch; break;
-                        case EFoliageCategory::SmallTree:  bAllowed = Entry->bAllowOnSmallPatch;  break;
-                        case EFoliageCategory::Shrub:      bAllowed = Entry->bAllowOnShrubPatch;  break;
-                        case EFoliageCategory::Flower:     bAllowed = Entry->bAllowOnShrubPatch;  break;
-                        default:                           bAllowed = true;                        break;
-                    }
-                    if (!bAllowed) { ++DbgPatchReject; continue; }
-                }
-
-                // ── Spear collision — sphere swept above ground → canopy ───────
-                // Only runs when "Detect Buildings" is checked.
-                // Sweeping a sphere along the vertical axis traces a capsule-
-                // shaped volume spanning the plant's height.
-                // Two measures prevent false-positives from flat floor/ground meshes:
-                //  1. The sweep STARTS above the ground zone (GroundSkip offset),
-                //     so adjacent sidewalk / road meshes at the same Z are skipped.
-                //  2. Any hit actor whose vertical half-extent is < 25 cm (same
-                //     threshold as building detection) is treated as a flat mesh
-                //     and ignored — not a building.
-                if (bSpearCollision)
-                {
-                    const FCategoryRules& R = GetRules(Entry->Category);
-
-                    float ActiveClearance = 0.f;
-                    switch (Entry->Category)
-                    {
-                        case EFoliageCategory::LargeTree:  ActiveClearance = ClearanceLargeTree;  break;
-                        case EFoliageCategory::MediumTree: ActiveClearance = ClearanceMediumTree; break;
-                        case EFoliageCategory::SmallTree:  ActiveClearance = ClearanceSmallTree;  break;
-                        case EFoliageCategory::Shrub:      ActiveClearance = ClearanceShrub;      break;
-                        case EFoliageCategory::Flower:     ActiveClearance = ClearanceFlower;     break;
-                        default:                           ActiveClearance = ClearanceShrub;      break;
-                    }
-
-                    float BaseSpearRadius = SpearRadiusShrub;
-                    switch (Entry->Category)
-                    {
-                        case EFoliageCategory::LargeTree:  BaseSpearRadius = SpearRadiusLarge;  break;
-                        case EFoliageCategory::MediumTree: BaseSpearRadius = SpearRadiusMedium; break;
-                        case EFoliageCategory::SmallTree:  BaseSpearRadius = SpearRadiusSmall;  break;
-                        case EFoliageCategory::Shrub:      BaseSpearRadius = SpearRadiusShrub;  break;
-                        case EFoliageCategory::Flower:     BaseSpearRadius = SpearRadiusFlower; break;
-                        default: break;
-                    }
-                    const float SpearRadius = BaseSpearRadius + ActiveClearance;
-
-                    // Start the sweep above the ground-surface zone so that
-                    // adjacent flat meshes (sidewalks, roads, paths) at similar
-                    // Z to the hit point are not inside the sphere at tick 0.
-                    // GroundSkip = 100 cm for large plants, scales down for small.
-                    const float GroundSkip  = FMath::Clamp(R.SpearHalfHeight * 0.1f, 5.f, 100.f);
-                    const FVector SpearBottom = Hit.Location + FVector(0.f, 0.f, GroundSkip);
-                    const FVector SpearTop    = Hit.Location + FVector(0.f, 0.f, R.SpearHalfHeight * 2.f);
-
-                    // Ignore target surface actors, the IFA, and every actor whose
-                    // collision we temporarily enabled (walls, floors, ceilings).
-                    // Those were collision-less before this run and must not be
-                    // mistaken for buildings in arch-viz interior scenes.
-                    FCollisionQueryParams SpearQP(NAME_None, /*bTraceComplex=*/false);
-                    for (AActor* TA : TargetActorSet) SpearQP.AddIgnoredActor(TA);
-                    SpearQP.AddIgnoredActor(IFA);
-                    for (const FScopedCollisionModifier::FSavedState& SC : CollisionGuard.Modifications)
-                        if (SC.SMC) SpearQP.AddIgnoredActor(SC.SMC->GetOwner());
-
-                    FHitResult SpearHit;
-                    const bool bAnyHit = World->SweepSingleByObjectType(
-                        SpearHit,
-                        SpearBottom,
-                        SpearTop,
-                        FQuat::Identity,
-                        FCollisionObjectQueryParams(ECollisionChannel::ECC_WorldStatic),
-                        FCollisionShape::MakeSphere(SpearRadius),
-                        SpearQP);
-
-                    if (bAnyHit)
-                    {
-                        // Filter out flat ground-level meshes (roads, paths, kerbs).
-                        // A real building has Z half-extent ≥ 25 cm.
-                        bool bIsBuilding = true;
-                        AActor* HitA = SpearHit.GetActor();
-                        if (IsValid(HitA))
-                        {
-                            FVector HO, HExt;
-                            HitA->GetActorBounds(false, HO, HExt);
-                            if (HExt.Z < SpearFlatThreshold) bIsBuilding = false;
-                        }
-                        if (bIsBuilding) { ++DbgSpearReject; continue; }
-                    }
-                }
-
-                // ── Canopy check ───────────────────────────────────────────────
-                // Reject if an existing foliage canopy is directly overhead.
-                // We intentionally ignore every actor whose collision we enabled
-                // (target surfaces, walls, ceilings, floor slabs) so that only
-                // geometry that had collision BEFORE this run can block placement.
-                // This prevents ceilings in arch-viz interiors from falsely
-                // rejecting every candidate.
-                if (bCanopyCheck)
-                {
-                    FCollisionQueryParams CanopyQP(NAME_None, /*bTraceComplex=*/false);
-                    CanopyQP.AddIgnoredActor(IFA);
-                    for (const FScopedCollisionModifier::FSavedState& SC : CollisionGuard.Modifications)
-                        if (SC.SMC) CanopyQP.AddIgnoredActor(SC.SMC->GetOwner());
-
-                    FHitResult CanopyHit;
-                    if (World->LineTraceSingleByChannel(
-                            CanopyHit,
-                            Hit.Location + FVector(0.f, 0.f, 10.f),
-                            Hit.Location + FVector(0.f, 0.f, Spacing * 2.f),
-                            ECC_WorldStatic, CanopyQP))
-                    { ++DbgCanopyReject; continue; }
-                }
-
-                // ── Cross-foliage spacing ──────────────────────────────────────
-                // Reject if too close to ANY already-placed instance (any type).
-                const float HalfSp = Spacing * 0.5f;
-                if (IsTooCloseToAny(Hit.Location.X, Hit.Location.Y, HalfSp))
-                { ++DbgHashReject; continue; }
-
-                // ── Build instance ─────────────────────────────────────────────
-                FFoliageInstance Inst;
-                Inst.Location    = Hit.Location;
-                Inst.Rotation    = FRotator(0.f, Rng.FRandRange(0.f, 360.f), 0.f);
-                const float Scale = Rng.FRandRange(ScaleMin, ScaleMax);
-                Inst.DrawScale3D = FVector3f(Scale, Scale, Scale);
-                RegisterPlacedPoint(Hit.Location.X, Hit.Location.Y, HalfSp);
-                Instances.Add(MoveTemp(Inst));
+            }
         }
 
         if (Instances.IsEmpty())
         {
             AppendLog(FString::Printf(
-                TEXT("  %s: 0 placements (spacing %.0f cm) [tried=%d noSurf=%d patch=%d spear=%d canopy=%d hash=%d]"),
+                TEXT("  %s: 0 placements (spacing %.0f cm) [sampled=%d patch=%d spear=%d canopy=%d hash=%d]"),
                 *Entry->AssetName, Spacing,
-                DbgCandidates, DbgNoSurface, DbgPatchReject,
+                DbgCandidates, DbgPatchReject,
                 DbgSpearReject, DbgCanopyReject, DbgHashReject));
             continue;
         }
