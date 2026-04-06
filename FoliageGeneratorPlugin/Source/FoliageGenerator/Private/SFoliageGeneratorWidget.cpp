@@ -1562,7 +1562,6 @@ FReply SFoliageGeneratorWidget::OnDebugPointsClicked()
     // when "Use Selection" is on → selected actors only,
     // otherwise → every actor whose SMC uses the target material.
     TArray<AStaticMeshActor*> TargetActors;
-    UMaterialInterface* TargetMat = TargetMaterial.Get();
     if (bUseSelection)
     {
         USelection* Sel = GEditor->GetSelectedActors();
@@ -1570,15 +1569,20 @@ FReply SFoliageGeneratorWidget::OnDebugPointsClicked()
             if (AStaticMeshActor* A = Cast<AStaticMeshActor>(Sel->GetSelectedObject(i)))
                 TargetActors.Add(A);
     }
-    else if (TargetMat)
+    else if (!MaterialPath.IsEmpty())
     {
-        for (TActorIterator<AStaticMeshActor> It(World); It; ++It)
+        UMaterialInterface* TargetMat = Cast<UMaterialInterface>(
+            StaticLoadObject(UMaterialInterface::StaticClass(), nullptr, *MaterialPath));
+        if (TargetMat)
         {
-            UStaticMeshComponent* SMC = (*It)->GetStaticMeshComponent();
-            if (!SMC) continue;
-            for (UMaterialInterface* M : SMC->GetMaterials())
-                if (M && M->GetBaseMaterial() == TargetMat->GetBaseMaterial())
-                    { TargetActors.Add(*It); break; }
+            for (TActorIterator<AStaticMeshActor> It(World); It; ++It)
+            {
+                UStaticMeshComponent* SMC = (*It)->GetStaticMeshComponent();
+                if (!SMC) continue;
+                for (UMaterialInterface* M : SMC->GetMaterials())
+                    if (M && (M == TargetMat || M->GetPathName() == MaterialPath))
+                        { TargetActors.Add(*It); break; }
+            }
         }
     }
     if (TargetActors.IsEmpty())
