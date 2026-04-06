@@ -1863,115 +1863,303 @@ def generate_foliage():
         # ── Batch-submit all queued placements ───────────────────────────────
         # _pending_xforms stores raw (x, y, z, yaw_deg, scale) tuples.
         #
-        # Strategy A  — InstancedFoliageActor.add_instances()
-        #   Tries three known UE5 Python binding signatures (version-dependent).
-        #   On success → plants appear in Foliage Mode palette.
+        # WHY IFA PYTHON METHODS DON'T EXIST:
+        #   AInstancedFoliageActor has zero BlueprintCallable UFUNCTIONs in UE5,
+        #   so add_instances / add_instance / add_mesh are NOT exposed to Python.
+        #   The only foliage API reachable from Python is through the
+        #   HierarchicalInstancedStaticMeshComponent (HISC) that the IFA owns
+        #   per FoliageType, and through editor subsystems if available.
         #
-        # Strategy B  — individual StaticMeshActors (guaranteed fallback)
-        #   Uses Rotator(pitch=0, yaw=yaw, roll=0) directly — no Quat math,
-        #   so Z-up is guaranteed and there is zero rotation corruption.
+        # Placement cascade (first success wins per mesh):
+        #   A — FoliageEditorSubsystem   (UE5.1+, Foliage Mode palette)
+        #   B — IFA HISC component       (find existing HISC, Foliage Mode)
+        #   C — InstancedStaticMeshActor (efficient ISM batch, not in palette)
+        #   D — Individual StaticMeshActors (guaranteed last resort)
 
         _ue_sub    = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem)
         _lvl_world = _ue_sub.get_editor_world()
         _actor_sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
 
-        # Locate (or spawn) the level's InstancedFoliageActor
+        def _build_xf(px, py, pz, pyaw, ps):
+            """Build a yaw-only Z-up Transform from a raw placement tuple.
+            Uses Quat directly to avoid any Rotator-to-Quat precision loss."""
+            h = math.radians(pyaw) * 0.5
+            rot = unreal.Quat(0.0, 0.0, math.sin(h), math.cos(h))
+            try:
+                return unreal.Transform(
+                    rotation=rot,
+                    translation=unreal.Vector(px, py, pz),
+                    scale3d=unreal.Vector(ps, ps, ps),
+                )
+            except Exception:
+                xf = unreal.Transform()
+                xf.translation = unreal.Vector(px, py, pz)
+                xf.rotation    = rot
+                xf.scale3d     = unreal.Vector(ps, ps, ps)
+                return xf
+
+        # ── A: FoliageEditorSubsystem ─────────────────────────────────────────
+        # UE5.1+ editor subsystem — first path that succeeds wins.
+        # CRITICAL: This subsystem is what lets Python both *register* a
+        # FoliageType in the Foliage Mode palette AND place instances, all in
+        # one call.  Without it we fall back to direct HISC manipulation.
+        _foliage_sub      = None
+        _foliage_sub_log  = []
+
+        # Pass 1 — try direct Python attribute (registered auto-stub)
+        if hasattr(unreal, 'FoliageEditorSubsystem'):
+            try:
+                _foliage_sub = unreal.get_editor_subsystem(unreal.FoliageEditorSubsystem)
+                _foliage_sub_log.append("found via unreal.FoliageEditorSubsystem")
+            except Exception as _e_a1:
+                _foliage_sub_log.append(
+                    f"attr exists but get_editor_subsystem raised: {_e_a1}")
+        else:
+            _foliage_sub_log.append("unreal.FoliageEditorSubsystem not in module")
+
+        # Pass 2 — load_class path scan (class may be present in C++ but not
+        #          auto-registered as a Python attribute in this UE5 build)
+        if _foliage_sub is None:
+            for _fes_path in (
+                "/Script/FoliageEdit.FoliageEditorSubsystem",
+                "/Script/Foliage.FoliageEditorSubsystem",
+                "/Script/UnrealEd.FoliageEditorSubsystem",
+            ):
+                try:
+                    _fes_cls = unreal.load_class(None, _fes_path)
+                    if _fes_cls is not None:
+                        _cand = unreal.get_editor_subsystem(_fes_cls)
+                        if _cand is not None:
+                            _foliage_sub = _cand
+                            _foliage_sub_log.append(
+                                f"found via load_class('{_fes_path}')")
+                            break
+                except Exception as _e_a2:
+                    _foliage_sub_log.append(
+                        f"load_class('{_fes_path}'): {_e_a2}")
+
+        _foliage_sub_status = " | ".join(_foliage_sub_log)
+        if _foliage_sub is not None:
+            print(f"[Foliage]   ✓ FoliageEditorSubsystem: {_foliage_sub_status}")
+        else:
+            print(f"[Foliage]   ✗ FoliageEditorSubsystem unavailable: "
+                  f"{_foliage_sub_status}")
+            print(f"[Foliage]     Strategy B (IFA HISC) will be used — see "
+                  f"instructions at end of log if placement falls back to "
+                  f"StaticMeshActors")
+
+        # ── B: IFA + HISC helpers ─────────────────────────────────────────────
+        # The IFA stores each FoliageType as a HISC component.
+        # _find_ifa_hisc   — finds an EXISTING HISC by mesh path
+        # _get_or_create_ifa_hisc — finds OR CREATES one on the IFA actor;
+        #   creating a HISC directly on the IFA is how we "load into the
+        #   Foliage Editor" without the subsystem API: the actor already owns
+        #   the component and the HISC's static_mesh reference is set, making
+        #   the instances available for Foliage Mode editing once the editor
+        #   refreshes.
         _ifa = None
         try:
             _ifa_list = unreal.GameplayStatics.get_all_actors_of_class(
                 _lvl_world, unreal.InstancedFoliageActor
             )
             _ifa = _ifa_list[0] if _ifa_list else None
-            if _ifa is None:
-                _ifa = _actor_sub.spawn_actor_from_class(
-                    unreal.InstancedFoliageActor,
-                    unreal.Vector(0.0, 0.0, 0.0),
-                    unreal.Rotator(0.0, 0.0, 0.0),
-                )
+            if _ifa is not None:
+                print(f"[Foliage]   ✓ InstancedFoliageActor found in level")
+            else:
+                print(f"[Foliage]   ✗ No InstancedFoliageActor in level yet "
+                      f"(will be created by Foliage Mode on first palette drop)")
         except Exception as _e_ifa:
-            print(f"[Foliage] ⚠ IFA lookup failed ({_e_ifa}) — using StaticMeshActor fallback")
+            print(f"[Foliage]   ✗ IFA lookup failed: {_e_ifa}")
 
-        # Probe add_instances signature once and cache which variant works
-        _ifa_sig = None   # None = unknown, False = none worked
-
-        def _try_add_instances(ft, xf_arr):
-            """Try every known UE5 Python signature for IFA.add_instances().
-            Returns True on first success, False if all fail."""
-            nonlocal _ifa_sig
+        def _find_ifa_hisc(mesh):
+            """Return the HISC on the IFA whose static_mesh matches *mesh*, or None."""
             if _ifa is None:
-                return False
-            if _ifa_sig is False:
-                return False
-
-            variants = [
-                # (label, call)
-                ("(ft, xforms, True)",  lambda: _ifa.add_instances(ft, xf_arr, True)),
-                ("(ft, xforms, False)", lambda: _ifa.add_instances(ft, xf_arr, False)),
-                ("(ft, xforms)",        lambda: _ifa.add_instances(ft, xf_arr)),
-                ("(ft, True, xforms)",  lambda: _ifa.add_instances(ft, True,  xf_arr)),
-                ("(ft, False, xforms)", lambda: _ifa.add_instances(ft, False, xf_arr)),
-            ]
-            # If we already found a working variant, go straight to it
-            if _ifa_sig is not None:
-                _, call = variants[_ifa_sig]
+                return None
+            mesh_path = mesh.get_path_name()
+            for getter in [
+                lambda: list(_ifa.get_components_by_class(
+                    unreal.HierarchicalInstancedStaticMeshComponent)),
+                lambda: [_ifa.get_component_by_class(
+                    unreal.HierarchicalInstancedStaticMeshComponent)],
+            ]:
                 try:
-                    call()
-                    return True
-                except Exception:
-                    _ifa_sig = False
-                    return False
-
-            for i, (lbl, call) in enumerate(variants):
-                try:
-                    call()
-                    _ifa_sig = i
-                    print(f"[Foliage]   IFA.add_instances working signature: {lbl}")
-                    return True
+                    for comp in getter():
+                        if comp is None:
+                            continue
+                        try:
+                            sm = comp.get_editor_property("static_mesh")
+                            if sm is not None and sm.get_path_name() == mesh_path:
+                                return comp
+                        except Exception:
+                            pass
                 except Exception:
                     pass
-            _ifa_sig = False
-            return False
+            return None
 
-        _fallback_warned = False
+        def _get_or_create_ifa_hisc(mesh):
+            """Find or CREATE a HISC on the IFA for *mesh*.
+
+            Creating a HISC on the IFA is the programmatic equivalent of
+            dragging a FoliageType into the Foliage Editor palette — the IFA
+            actor owns the component and instances placed into it will appear
+            as batched foliage instances in the level.
+
+            Returns (component, was_newly_created).
+            """
+            existing = _find_ifa_hisc(mesh)
+            if existing is not None:
+                return existing, False   # already registered
+
+            if _ifa is None:
+                return None, False
+
+            # Attempt to add a new HISC component directly to the IFA actor.
+            # AActor::AddComponentByClass is BlueprintCallable and therefore
+            # Python-accessible.
+            try:
+                new_comp = _ifa.add_component_by_class(
+                    unreal.HierarchicalInstancedStaticMeshComponent,
+                    False,               # manual_attachment=False → auto-attach
+                    unreal.Transform(),  # relative_transform
+                    False,               # deferred_finish_registration=False
+                )
+                if new_comp is not None:
+                    new_comp.set_editor_property("static_mesh", mesh)
+                    return new_comp, True
+            except Exception as _e_crt:
+                pass   # logged per-mesh in Strategy B below
+
+            return None, False
+
+        # ── C: InstancedStaticMeshActor availability check ────────────────────
+        # Try Python attribute first, then load_class fallback.
+        _isma_class = None
+        if hasattr(unreal, 'InstancedStaticMeshActor'):
+            _isma_class = unreal.InstancedStaticMeshActor
+        else:
+            try:
+                _isma_class = unreal.load_class(
+                    None, "/Script/Engine.InstancedStaticMeshActor")
+            except Exception:
+                pass
+        _has_isma = _isma_class is not None
+
+        _any_strategy_d  = False   # tracks whether the last-resort fallback ran
+        _fallback_warned = False   # gate for the one-time fallback notice per run
 
         for _sm_path, _raw_pts in _pending_xforms.items():
             _mesh = loaded_meshes.get(_sm_path) or border_mesh_map.get(_sm_path)
             if _mesh is None:
                 continue
-            _mesh_lbl = _sm_path.split("/")[-1].split(".")[0]
+            _mesh_lbl    = _sm_path.split("/")[-1].split(".")[0]
+            _ft          = _get_foliage_type(_sm_path, _mesh)
+            _placed_mode = False   # True = ended up in Foliage Mode palette
 
-            # ── Strategy A: IFA foliage instances ─────────────────────────
-            _used_ifa = False
-            if _ifa is not None and _ifa_sig is not False:
-                _ft = _get_foliage_type(_sm_path, _mesh)
-                if _ft is not None:
-                    # Build unreal.Array[Transform] — yaw-only, Z-up
-                    _xf_arr = unreal.Array(unreal.Transform)
-                    for (_px, _py, _pz, _pyaw, _ps) in _raw_pts:
-                        _h  = math.radians(_pyaw) * 0.5
-                        _q  = unreal.Quat(0.0, 0.0, math.sin(_h), math.cos(_h))
-                        _xf = unreal.Transform()
-                        _xf.translation = unreal.Vector(_px, _py, _pz)
-                        _xf.rotation    = _q
-                        _xf.scale3d     = unreal.Vector(_ps, _ps, _ps)
-                        _xf_arr.append(_xf)
-                    if _try_add_instances(_ft, _xf_arr):
-                        _used_ifa = True
+            # ── Strategy A: FoliageEditorSubsystem ───────────────────────────
+            # CRITICAL ORDER: register FT in the palette FIRST (add_foliage_type),
+            # then place instances (spawn_foliage_instances).
+            # Without registration the IFA has no HISC for this FT and any
+            # instance-placement call will fail or be silently ignored.
+            if _foliage_sub is not None and _ft is not None and not _placed_mode:
+                # Step 1 — register in Foliage palette
+                for _reg_fn in [
+                    lambda: _foliage_sub.add_foliage_type(_ft),
+                    lambda: _foliage_sub.add_foliage_type(_ft, None),
+                    lambda: _foliage_sub.register_foliage_type(_ft),
+                ]:
+                    try:
+                        _reg_fn()
+                        break   # registered — stop trying
+                    except Exception:
+                        pass
+
+                # Step 2 — place instances (subsystem does this atomically)
+                _xf_arr = unreal.Array(unreal.Transform)
+                for t in _raw_pts:
+                    _xf_arr.append(_build_xf(*t))
+                for _sub_fn in [
+                    lambda: _foliage_sub.spawn_foliage_instances(_ft, _xf_arr),
+                    lambda: _foliage_sub.spawn_foliage_instances(_ft, _xf_arr, None),
+                    lambda: _foliage_sub.add_foliage_instances(_ft, _xf_arr),
+                    lambda: _foliage_sub.place_foliage(_ft, _xf_arr),
+                ]:
+                    try:
+                        _sub_fn()
+                        _placed_mode = True
                         print(f"[Foliage]   ↳ {len(_raw_pts):5d} foliage instances "
-                              f"(Foliage Mode) → {_mesh_lbl}")
+                              f"(FoliageEditorSubsystem → Foliage Mode) → {_mesh_lbl}")
+                        break
+                    except Exception:
+                        pass
+                # Even if spawn_foliage_instances failed, registration may have
+                # created the HISC — Strategy B will find and use it below.
 
-            # ── Strategy B: StaticMeshActors — Rotator, no Quat math ──────
-            if not _used_ifa:
+            # ── Strategy B: IFA HISC component ───────────────────────────────
+            # FIRST PATH TO FOLIAGE MODE PALETTE:
+            #   _get_or_create_ifa_hisc() finds an existing HISC registered for
+            #   this mesh (e.g. user dragged the FT_ asset to the palette), OR
+            #   creates a brand-new HISC directly on the IFA actor — which is
+            #   the programmatic "load into Foliage Editor" step that gives UE5
+            #   a batched, palette-visible component for this mesh.
+            if not _placed_mode:
+                _hisc, _hisc_created = _get_or_create_ifa_hisc(_mesh)
+                if _hisc is not None:
+                    try:
+                        _xf_arr = unreal.Array(unreal.Transform)
+                        for t in _raw_pts:
+                            _xf_arr.append(_build_xf(*t))
+                        _hisc.add_instances(_xf_arr, False)
+                        _placed_mode = True
+                        _mode_label = ("IFA HISC created+populated → Foliage Mode"
+                                       if _hisc_created else
+                                       "IFA HISC found → Foliage Mode")
+                        print(f"[Foliage]   ↳ {len(_raw_pts):5d} foliage instances "
+                              f"({_mode_label}) → {_mesh_lbl}")
+                    except Exception as _e_hisc:
+                        print(f"[Foliage]   ✗ HISC add_instances failed: {_e_hisc}")
+
+            # ── Strategy C: InstancedStaticMeshActor (efficient, not palette) ─
+            if not _placed_mode and _has_isma:
+                try:
+                    _isma = _actor_sub.spawn_actor_from_class(
+                        _isma_class,
+                        unreal.Vector(0.0, 0.0, 0.0),
+                        unreal.Rotator(0.0, 0.0, 0.0),
+                    )
+                    if _isma is not None:
+                        _ismc = _isma.get_component_by_class(
+                            unreal.InstancedStaticMeshComponent)
+                        if _ismc is not None:
+                            _ismc.set_editor_property("static_mesh", _mesh)
+                            _xf_arr = unreal.Array(unreal.Transform)
+                            for t in _raw_pts:
+                                _xf_arr.append(_build_xf(*t))
+                            _ismc.add_instances(_xf_arr, False)
+                            _placed_mode = True
+                            if not _fallback_warned:
+                                print("[Foliage]   Foliage Mode API unavailable — "
+                                      "using InstancedStaticMeshActor (efficient batch; "
+                                      "drag the FT_ assets from Content Browser into the "
+                                      "Foliage palette to paint/erase them later)")
+                                _fallback_warned = True
+                            print(f"[Foliage]   ↳ {len(_raw_pts):5d} ISM instances "
+                                  f"→ {_mesh_lbl}")
+                except Exception:
+                    pass
+
+            # ── Strategy D: individual StaticMeshActors (guaranteed fallback) ─
+            if not _placed_mode:
+                _any_strategy_d = True
                 if not _fallback_warned:
-                    print(f"[Foliage]   IFA unavailable — placing as StaticMeshActors "
-                          f"(select all + Foliage Mode > Convert to Foliage if needed)")
+                    print("[Foliage]   ⚠ Falling back to individual StaticMeshActors.")
+                    print("[Foliage]     See TWO-RUN WORKFLOW banner at end of log.")
                     _fallback_warned = True
                 _n = 0
                 for (_px, _py, _pz, _pyaw, _ps) in _raw_pts:
                     _a = _actor_sub.spawn_actor_from_class(
                         unreal.StaticMeshActor,
                         unreal.Vector(_px, _py, _pz),
-                        unreal.Rotator(0.0, _pyaw, 0.0),  # pitch=0, yaw, roll=0 → Z up
+                        unreal.Rotator(pitch=0.0, yaw=_pyaw, roll=0.0),
                     )
                     if _a is None:
                         continue
@@ -1981,6 +2169,36 @@ def generate_foliage():
                     _a.set_actor_scale3d(unreal.Vector(_ps, _ps, _ps))
                     _n += 1
                 print(f"[Foliage]   ↳ {_n:5d} StaticMeshActors → {_mesh_lbl}")
+
+        # ── TWO-RUN WORKFLOW BANNER (shown when Foliage Mode API was unavailable) ─
+        if _any_strategy_d:
+            _sep = "═" * 66
+            print(f"\n[Foliage] {_sep}")
+            print(f"[Foliage]  ⚠  FOLIAGE MODE PALETTE REGISTRATION REQUIRED")
+            print(f"[Foliage] {_sep}")
+            print(f"[Foliage]  Plants were placed as individual StaticMeshActors")
+            print(f"[Foliage]  because neither FoliageEditorSubsystem nor a live")
+            print(f"[Foliage]  IFA HISC was available from Python in this UE5 build.")
+            print(f"[Foliage]")
+            print(f"[Foliage]  ── HOW TO GET PLANTS INTO FOLIAGE MODE ──────────────")
+            print(f"[Foliage]")
+            print(f"[Foliage]  STEP 1  Press Ctrl+Z to UNDO all placed actors now.")
+            print(f"[Foliage]")
+            print(f"[Foliage]  STEP 2  Open the Foliage Mode panel")
+            print(f"[Foliage]          (toolbar: Shift+4  or  Mode → Foliage)")
+            print(f"[Foliage]")
+            print(f"[Foliage]  STEP 3  In the Content Browser navigate to:")
+            print(f"[Foliage]          /Game/FoliageGenerator/AutoFoliageTypes/")
+            print(f"[Foliage]          Select ALL FT_Auto_* assets (Ctrl+A)")
+            print(f"[Foliage]          Drag them into the Foliage Mode palette.")
+            print(f"[Foliage]          ← This is the 'load into Foliage Editor' step.")
+            print(f"[Foliage]          UE5 will create a HISC on the IFA for each one.")
+            print(f"[Foliage]")
+            print(f"[Foliage]  STEP 4  Re-run this script.")
+            print(f"[Foliage]          Strategy B will now find the registered HISCs")
+            print(f"[Foliage]          and place every instance into Foliage Mode.")
+            print(f"[Foliage]")
+            print(f"[Foliage] {_sep}\n")
 
     # ── Placement diagnostics ─────────────────────────────────────────────────
     print(f"[Foliage] Points: {diag_gen} generated  "

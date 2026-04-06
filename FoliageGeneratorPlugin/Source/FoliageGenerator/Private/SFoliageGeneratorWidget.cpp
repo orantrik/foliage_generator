@@ -2085,12 +2085,44 @@ void SFoliageGeneratorWidget::RunGenerate()
             PC[0], PC[1], PC[2], PC[3]));
     }
 
-    // O(1) lookup: world XY → patch category using sparse structures
+    // ── Selection-wide patch category ────────────────────────────────────────
+    // When the user explicitly chose actors in the viewport the whole selection
+    // is treated as ONE patch whose size = combined-bounds longest dimension.
+    // This avoids per-tile BFS scores of 0 that mis-classify a 10 m courtyard
+    // made of small individual tiles as "Shrub" (each tile is a boundary cell).
+    EFoliageCategory SelectionPatchCat = EFoliageCategory::Shrub;
+    if (bUseSelection)
+    {
+        const float LongestDim = FMath::Max(CombinedBounds.GetSize().X,
+                                            CombinedBounds.GetSize().Y);
+        if      (LongestDim >= PatchThresholdLarge)  SelectionPatchCat = EFoliageCategory::LargeTree;
+        else if (LongestDim >= PatchThresholdMedium) SelectionPatchCat = EFoliageCategory::MediumTree;
+        else if (LongestDim >= PatchThresholdSmall)  SelectionPatchCat = EFoliageCategory::SmallTree;
+        AppendLog(FString::Printf(
+            TEXT("Selection patch class: %s  (longest dim %.0f cm)"),
+            SelectionPatchCat == EFoliageCategory::LargeTree  ? TEXT("Large Tree")  :
+            SelectionPatchCat == EFoliageCategory::MediumTree ? TEXT("Medium Tree") :
+            SelectionPatchCat == EFoliageCategory::SmallTree  ? TEXT("Small Tree")  :
+                                                                TEXT("Shrub/Flower"),
+            LongestDim));
+    }
+
+    // O(1) lookup: world XY → patch category using sparse structures.
+    // For explicit viewport selections the whole selection is one patch
+    // (SelectionPatchCat); BFS distance is not meaningful for small tiles.
     auto GetPatchAt = [&](float WX, float WY) -> TOptional<EFoliageCategory>
     {
         const FIntPoint Cell(
             FMath::FloorToInt((WX - GMinX) / CellSize),
             FMath::FloorToInt((WY - GMinY) / CellSize));
+        if (bUseSelection)
+        {
+            // For explicit selection: any hit point on a target actor is valid.
+            // Skip OccupiedCells lookup — small tiles may have empty occupancy
+            // due to grid-alignment margin, but bFoundTarget already confirms
+            // we are on a target surface.
+            return SelectionPatchCat;
+        }
         if (!OccupiedCells.Contains(Cell)) return {};
         const float* DP = DistMap.Find(Cell);
         const float  D  = DP ? *DP : 0.f;
@@ -2205,31 +2237,48 @@ void SFoliageGeneratorWidget::RunGenerate()
         // generations (or earlier in this run) never intercept the trace.
         QP.AddIgnoredActor(IFA);
 
-        // ── Per-actor grid walk — avoids scanning empty space between patches ──
-        // Grid centres are collected per-actor bounds and deduplicated so that
-        // overlapping actor AABBs never generate duplicate candidates.
+        // ── Grid walk — combined bounds + per-actor centre fallback ───────────
+        //
+        // The previous per-actor AABB loop silently generated 0 candidates when
+        // a single tile was narrower than Spacing/2 (e.g. a 200 cm tile with
+        // 1100 cm large-tree spacing).  Fix: walk the COMBINED bounds at Spacing
+        // intervals so grid points are placed relative to the whole selection/
+        // scene extent.  Then add each actor centre as an explicit fallback so
+        // that tiles narrower than Spacing always get at least one candidate.
         TSet<TPair<int32,int32>> VisitedGridKeys;
         TArray<FVector2D> GridPoints;
+
+        // 1. Uniform grid across all target surfaces
+        for (float GX0 = (float)CombinedBounds.Min.X + Spacing * 0.5f;
+             GX0 <= (float)CombinedBounds.Max.X;
+             GX0 += Spacing)
+        {
+            for (float GY0 = (float)CombinedBounds.Min.Y + Spacing * 0.5f;
+                 GY0 <= (float)CombinedBounds.Max.Y;
+                 GY0 += Spacing)
+            {
+                const int32 KX = FMath::RoundToInt(GX0 / Spacing);
+                const int32 KY = FMath::RoundToInt(GY0 / Spacing);
+                if (!VisitedGridKeys.Contains({KX, KY}))
+                {
+                    VisitedGridKeys.Add({KX, KY});
+                    GridPoints.Add(FVector2D(GX0, GY0));
+                }
+            }
+        }
+
+        // 2. Actor-centre fallback — guarantees at least one candidate per
+        //    actor even when the actor is narrower than Spacing/2.
         for (AStaticMeshActor* TA : TargetActors)
         {
             FVector Orig, Ext;
             TA->GetActorBounds(false, Orig, Ext);
-            for (float GX0 = (float)(Orig.X - Ext.X) + Spacing * 0.5f;
-                 GX0 <= (float)(Orig.X + Ext.X);
-                 GX0 += Spacing)
+            const int32 KX = FMath::RoundToInt((float)Orig.X / Spacing);
+            const int32 KY = FMath::RoundToInt((float)Orig.Y / Spacing);
+            if (!VisitedGridKeys.Contains({KX, KY}))
             {
-                for (float GY0 = (float)(Orig.Y - Ext.Y) + Spacing * 0.5f;
-                     GY0 <= (float)(Orig.Y + Ext.Y);
-                     GY0 += Spacing)
-                {
-                    const int32 KX = FMath::RoundToInt(GX0 / Spacing);
-                    const int32 KY = FMath::RoundToInt(GY0 / Spacing);
-                    if (!VisitedGridKeys.Contains({KX, KY}))
-                    {
-                        VisitedGridKeys.Add({KX, KY});
-                        GridPoints.Add(FVector2D(GX0, GY0));
-                    }
-                }
+                VisitedGridKeys.Add({KX, KY});
+                GridPoints.Add(FVector2D((float)Orig.X, (float)Orig.Y));
             }
         }
 
@@ -2328,6 +2377,12 @@ void SFoliageGeneratorWidget::RunGenerate()
                 // it accurately represents the actual surface shape including
                 // L-shapes, courtyards, and concave outlines — unlike any bounding
                 // box approximation.  O(1) TSet lookup.
+                //
+                // SKIPPED for explicit viewport selection: bFoundTarget already
+                // confirms the hit is on a TargetActorSet member.  Small tiles
+                // (<200 cm) may have zero occupied cells due to the 50 cm margin
+                // in the footprint rasteriser, causing false rejections here.
+                if (!bUseSelection)
                 {
                     const FIntPoint HitCell(
                         FMath::FloorToInt((Hit.Location.X - GMinX) / CellSize),

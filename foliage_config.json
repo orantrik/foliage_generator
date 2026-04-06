@@ -1,0 +1,110 @@
+{
+  "material_path": "/Game/CityPark/Materials/ParkSquare/MI_ParkSquare04",
+  "seed": 42,
+  "mesh_folder": "/Game",
+  "mesh_list": [
+    [
+      "/Game/CityPark/Meshes/Flora/Bushs/SM_Bush1_03",
+      "SHRUB"
+    ],
+    [
+      "/Game/CityPark/Meshes/Flora/Bushs/SM_Bush1_04",
+      "SHRUB"
+    ],
+    [
+      "/Game/CityPark/Meshes/Flora/Bushs/SM_Bush2_01",
+      "SHRUB"
+    ],
+    [
+      "/Game/CityPark/Meshes/Flora/Bushs/SM_Bush5_04",
+      "SMALL_TREE"
+    ],
+    [
+      "/Game/CityPark/Meshes/Flora/Bushs/SM_Bush5_01",
+      "SHRUB"
+    ],
+    [
+      "/Game/CityPark/Meshes/Flora/Trees/SM_Elm04",
+      "SHRUB"
+    ],
+    [
+      "/Game/CityPark/Meshes/Flora/Trees/SM_Elm02",
+      "SHRUB"
+    ],
+    [
+      "/Game/CityPark/Meshes/Flora/Trees/SM_Elm05",
+      "MEDIUM_TREE"
+    ],
+    [
+      "/Game/CityPark/Meshes/Flora/Trees/SM_AmurCork05",
+      "MEDIUM_TREE"
+    ],
+    [
+      "/Game/CityPark/Meshes/Flora/Trees/SM_AmurCork04",
+      "SHRUB"
+    ],
+    [
+      "/Game/CityPark/Meshes/Flora/Trees/SM_AmurCork01",
+      "SHRUB"
+    ],
+    [
+      "/Game/CityPark/Meshes/Flora/Trees/SM_Elm10",
+      "MEDIUM_TREE"
+    ],
+    [
+      "/Game/CityPark/Meshes/Flora/Trees/SM_Elm15",
+      "LARGE_TREE"
+    ],
+    [
+      "/Game/CityPark/Meshes/Flora/Trees/SM_Elm17",
+      "LARGE_TREE"
+    ],
+    [
+      "/Game/CityPark/Meshes/Flora/Trees/SM_Elm13",
+      "LARGE_TREE"
+    ],
+    [
+      "/Game/CityPark/Meshes/Flora/Trees/SM_Elm11",
+      "LARGE_TREE"
+    ]
+  ],
+  "category_settings": {
+    "LARGE_TREE": {
+      "spacing_cm": 195,
+      "cluster_count": 1,
+      "cluster_radius_cm": 60,
+      "z_offset_cm": -204
+    },
+    "MEDIUM_TREE": {
+      "spacing_cm": 104,
+      "cluster_count": 2,
+      "cluster_radius_cm": 79,
+      "z_offset_cm": -204
+    },
+    "SMALL_TREE": {
+      "spacing_cm": 121,
+      "cluster_count": 1,
+      "cluster_radius_cm": 0,
+      "z_offset_cm": -68
+    },
+    "SHRUB": {
+      "spacing_cm": 98,
+      "cluster_count": 3,
+      "cluster_radius_cm": 139,
+      "z_offset_cm": -1
+    }
+  },
+  "canopy_collision": true,
+  "building_clearance_cm": 36,
+  "garden_design": {
+    "enabled": true,
+    "border_width_cm": 50,
+    "border_offset_cm": 10,
+    "border_spacing_cm": 30,
+    "border_rows": 1,
+    "border_sequence": [
+      "/Script/Foliage.FoliageType_InstancedStaticMesh'/Game/Simplex/Foliege/FT_Blue_Lupin_tjtjfinia_Var1_lod1.FT_Blue_Lupin_tjtjfinia_Var1_lod1'",
+      "/Script/Foliage.FoliageType_InstancedStaticMesh'/Game/Simplex/Foliege/FT_Bird_Of_Paradise_wfypeifha_Var8_lod1.FT_Bird_Of_Paradise_wfypeifha_Var8_lod1'"
+    ]
+  }
+}
