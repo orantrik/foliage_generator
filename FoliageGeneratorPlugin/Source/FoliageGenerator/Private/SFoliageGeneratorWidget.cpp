@@ -18,6 +18,9 @@
 #include "FoliageType_InstancedStaticMesh.h"
 #include "FoliageType.h"
 
+// ── Debug visualization ───────────────────────────────────────────────────────
+#include "DrawDebugHelpers.h"
+
 // ── Engine / Editor ───────────────────────────────────────────────────────────
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
 #include "Engine/StaticMeshActor.h"
@@ -1339,7 +1342,7 @@ TSharedRef<SWidget> SFoliageGeneratorWidget::BuildButtonRow()
             .OnClicked(this, &SFoliageGeneratorWidget::OnGenerateClicked)
         ]
 
-        + SHorizontalBox::Slot().AutoWidth()
+        + SHorizontalBox::Slot().AutoWidth().Padding(FMargin(0.f, 0.f, 8.f, 0.f))
         [
             SNew(SButton)
             .Text(LOCTEXT("ClearBtn", "Clear All Foliage"))
@@ -1347,6 +1350,18 @@ TSharedRef<SWidget> SFoliageGeneratorWidget::BuildButtonRow()
                 "Removes ALL foliage instances from the level's InstancedFoliageActor.\n"
                 "FoliageType assets are preserved."))
             .OnClicked(this, &SFoliageGeneratorWidget::OnClearClicked)
+        ]
+
+        + SHorizontalBox::Slot().AutoWidth()
+        [
+            SNew(SButton)
+            .Text(LOCTEXT("DebugPtsBtn", "Show Placement Points"))
+            .ToolTipText(LOCTEXT("DebugPtsTip",
+                "Draws debug spheres in the viewport showing where the surface\n"
+                "detection finds valid placement positions on the target patch.\n"
+                "Green = accepted  |  Red = rejected by boundary check.\n"
+                "Spheres persist for 30 seconds then disappear automatically."))
+            .OnClicked(this, &SFoliageGeneratorWidget::OnDebugPointsClicked)
         ];
 }
 
@@ -1528,6 +1543,126 @@ FReply SFoliageGeneratorWidget::OnGenerateClicked()
 FReply SFoliageGeneratorWidget::OnClearClicked()
 {
     RunClear();
+    return FReply::Handled();
+}
+
+// ─── OnDebugPointsClicked ────────────────────────────────────────────────────
+// Draws debug spheres at every surface candidate that the placement algorithm
+// would find on the target patch.
+//  Green  = point accepted by surface detection + boundary containment check
+//  Red    = point failed the boundary containment check (outside mesh)
+// Spheres persist for 30 s then disappear automatically.
+
+FReply SFoliageGeneratorWidget::OnDebugPointsClicked()
+{
+    UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+    if (!World) return FReply::Handled();
+
+    // Mirror RunGenerate's actor collection exactly:
+    // when "Use Selection" is on → selected actors only,
+    // otherwise → every actor whose SMC uses the target material.
+    TArray<AStaticMeshActor*> TargetActors;
+    UMaterialInterface* TargetMat = TargetMaterial.Get();
+    if (bUseSelection)
+    {
+        USelection* Sel = GEditor->GetSelectedActors();
+        for (int32 i = 0; i < Sel->Num(); ++i)
+            if (AStaticMeshActor* A = Cast<AStaticMeshActor>(Sel->GetSelectedObject(i)))
+                TargetActors.Add(A);
+    }
+    else if (TargetMat)
+    {
+        for (TActorIterator<AStaticMeshActor> It(World); It; ++It)
+        {
+            UStaticMeshComponent* SMC = (*It)->GetStaticMeshComponent();
+            if (!SMC) continue;
+            for (UMaterialInterface* M : SMC->GetMaterials())
+                if (M && M->GetBaseMaterial() == TargetMat->GetBaseMaterial())
+                    { TargetActors.Add(*It); break; }
+        }
+    }
+    if (TargetActors.IsEmpty())
+    {
+        AppendLog(TEXT("Debug Points: no target actors found (check material + Use Selection)."));
+        return FReply::Handled();
+    }
+
+    // Build combined AABB
+    FBox CombinedBounds(ForceInit);
+    for (AStaticMeshActor* A : TargetActors)
+    {
+        FVector O, E; A->GetActorBounds(false, O, E);
+        CombinedBounds += FBox(O - E, O + E);
+    }
+
+    // 50 cm grid — dense enough to be readable, fast enough to stay responsive
+    constexpr float DebugStep = 50.f;
+    int32 nGreen = 0, nRed = 0;
+    const float TraceTop = (float)CombinedBounds.Max.Z + 500.f;
+    const float TraceBot = (float)CombinedBounds.Min.Z - 100.f;
+    FCollisionQueryParams QP(NAME_None, true);
+
+    for (float GX = (float)CombinedBounds.Min.X + DebugStep * 0.5f;
+         GX <= (float)CombinedBounds.Max.X; GX += DebugStep)
+    {
+        FSlateApplication::Get().PumpMessages(); // keep UI alive
+        for (float GY = (float)CombinedBounds.Min.Y + DebugStep * 0.5f;
+             GY <= (float)CombinedBounds.Max.Y; GY += DebugStep)
+        {
+            // Surface detection — trace first, AABB fallback (grid-centre rule)
+            FHitResult Hit;
+            bool bFound = false;
+            FVector PassStart(GX, GY, TraceTop);
+            const FVector PassEnd(GX, GY, TraceBot);
+            for (int32 P = 0; P < 8 && !bFound; ++P)
+            {
+                if (!World->LineTraceSingleByChannel(Hit, PassStart, PassEnd, ECC_Visibility, QP))
+                    break;
+                AStaticMeshActor* HA = Cast<AStaticMeshActor>(Hit.GetActor());
+                if (HA && TargetActors.Contains(HA)) bFound = true;
+                else PassStart = Hit.Location - FVector(0,0,1);
+            }
+            if (!bFound)
+            {
+                for (AStaticMeshActor* TA : TargetActors)
+                {
+                    FVector O, E; TA->GetActorBounds(false, O, E);
+                    if (GX < (float)(O.X-E.X) || GX > (float)(O.X+E.X)) continue;
+                    if (GY < (float)(O.Y-E.Y) || GY > (float)(O.Y+E.Y)) continue;
+                    Hit.Location = FVector(GX, GY, O.Z + E.Z);
+                    bFound = true; break;
+                }
+            }
+            if (!bFound) continue;
+
+            // Boundary containment — same fixed check as RunGenerate:
+            // use GetBox() so non-centred mesh pivots are handled correctly.
+            bool bInside = false;
+            for (AStaticMeshActor* TA : TargetActors)
+            {
+                UStaticMeshComponent* SMC = TA->GetStaticMeshComponent();
+                if (!SMC) continue;
+                const FVector LP =
+                    SMC->GetComponentTransform().InverseTransformPosition(Hit.Location);
+                const FBox LB = SMC->CalcLocalBounds().GetBox();
+                if (LP.X >= LB.Min.X - 1.f && LP.X <= LB.Max.X + 1.f &&
+                    LP.Y >= LB.Min.Y - 1.f && LP.Y <= LB.Max.Y + 1.f)
+                { bInside = true; break; }
+            }
+
+            // Green = valid placement point, Red = outside mesh boundary
+            DrawDebugSphere(World, Hit.Location + FVector(0,0,5),
+                            8.f, 6, bInside ? FColor::Green : FColor::Red,
+                            /*bPersist=*/false, /*LifeTime=*/30.f);
+            bInside ? ++nGreen : ++nRed;
+        }
+    }
+
+    AppendLog(FString::Printf(
+        TEXT("Debug Points: %d green (valid) | %d red (outside boundary) — visible for 30 s"),
+        nGreen, nRed));
+
+    if (GEditor) GEditor->RedrawAllViewports(true);
     return FReply::Handled();
 }
 
@@ -2115,12 +2250,18 @@ void SFoliageGeneratorWidget::RunGenerate()
                     {
                         UStaticMeshComponent* SMC = TA->GetStaticMeshComponent();
                         if (!SMC) continue;
+                        // Transform world hit into component local space, then
+                        // compare against the mesh's LOCAL bounding box.
+                        // CalcLocalBounds().GetBox() gives FBox(Origin-Ext,
+                        // Origin+Ext) which correctly handles meshes whose local
+                        // pivot is NOT at the bounding-box centre (very common in
+                        // arch-viz assets).  Ignoring Z lets flat planes pass.
                         const FVector LocalPt =
-                            TA->GetActorTransform().InverseTransformPosition(Hit.Location);
-                        const FBoxSphereBounds LB = SMC->CalcLocalBounds();
-                        // 1 cm tolerance absorbs float precision
-                        if (FMath::Abs(LocalPt.X) <= LB.BoxExtent.X + 1.f &&
-                            FMath::Abs(LocalPt.Y) <= LB.BoxExtent.Y + 1.f)
+                            SMC->GetComponentTransform().InverseTransformPosition(Hit.Location);
+                        const FBox LocalBox = SMC->CalcLocalBounds().GetBox();
+                        // 1 cm tolerance absorbs float precision at edges
+                        if (LocalPt.X >= LocalBox.Min.X - 1.f && LocalPt.X <= LocalBox.Max.X + 1.f &&
+                            LocalPt.Y >= LocalBox.Min.Y - 1.f && LocalPt.Y <= LocalBox.Max.Y + 1.f)
                         {
                             bInsideAny = true;
                             break;
