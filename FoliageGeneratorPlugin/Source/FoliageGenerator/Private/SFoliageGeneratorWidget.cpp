@@ -1559,113 +1559,103 @@ FReply SFoliageGeneratorWidget::OnDebugPointsClicked()
     UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
     if (!World) return FReply::Handled();
 
-    // Mirror RunGenerate's actor collection exactly:
-    // when "Use Selection" is on → selected actors only,
-    // otherwise → every actor whose SMC uses the target material.
+    // Debug Points ALWAYS works on the viewport selection only.
+    // Scanning the whole scene at 50 cm resolution is prohibitively expensive
+    // on large levels — this tool is designed as a spot-check on one patch.
     TArray<AStaticMeshActor*> TargetActors;
-    if (bUseSelection)
     {
         USelection* Sel = GEditor->GetSelectedActors();
         for (int32 i = 0; i < Sel->Num(); ++i)
             if (AStaticMeshActor* A = Cast<AStaticMeshActor>(Sel->GetSelectedObject(i)))
                 TargetActors.Add(A);
     }
-    else if (!MaterialPath.IsEmpty())
-    {
-        UMaterialInterface* TargetMat = Cast<UMaterialInterface>(
-            StaticLoadObject(UMaterialInterface::StaticClass(), nullptr, *MaterialPath));
-        if (TargetMat)
-        {
-            for (TActorIterator<AStaticMeshActor> It(World); It; ++It)
-            {
-                UStaticMeshComponent* SMC = (*It)->GetStaticMeshComponent();
-                if (!SMC) continue;
-                for (UMaterialInterface* M : SMC->GetMaterials())
-                    if (M && (M == TargetMat || M->GetPathName() == MaterialPath))
-                        { TargetActors.Add(*It); break; }
-            }
-        }
-    }
     if (TargetActors.IsEmpty())
     {
-        AppendLog(TEXT("Debug Points: no target actors found (check material + Use Selection)."));
+        AppendLog(TEXT("Debug Points: select at least one surface actor in the viewport first."));
         return FReply::Handled();
     }
 
-    // Build combined AABB
-    FBox CombinedBounds(ForceInit);
-    for (AStaticMeshActor* A : TargetActors)
-    {
-        FVector O, E; A->GetActorBounds(false, O, E);
-        CombinedBounds += FBox(O - E, O + E);
-    }
+    // Hard point cap — prevents accidental freeze on large selections
+    constexpr int32 MaxDebugPoints = 2000;
+    constexpr float DebugStep      = 50.f;   // 50 cm grid — readable but not excessive
 
-    // 50 cm grid — dense enough to be readable, fast enough to stay responsive
-    constexpr float DebugStep = 50.f;
-    int32 nGreen = 0, nRed = 0;
-    const float TraceTop = (float)CombinedBounds.Max.Z + 500.f;
-    const float TraceBot = (float)CombinedBounds.Min.Z - 100.f;
+    int32 nGreen = 0, nRed = 0, nTotal = 0;
     FCollisionQueryParams QP(NAME_None, true);
 
-    for (float GX = (float)CombinedBounds.Min.X + DebugStep * 0.5f;
-         GX <= (float)CombinedBounds.Max.X; GX += DebugStep)
+    // Walk per-actor bounds (same as RunGenerate) so two patches 2 km apart
+    // don't generate a 2 km × 2 km grid of trace points.
+    TSet<TPair<int32,int32>> VisitedKeys;
+    for (AStaticMeshActor* TA : TargetActors)
     {
-        FSlateApplication::Get().PumpMessages(); // keep UI alive
-        for (float GY = (float)CombinedBounds.Min.Y + DebugStep * 0.5f;
-             GY <= (float)CombinedBounds.Max.Y; GY += DebugStep)
+        if (nTotal >= MaxDebugPoints) break;
+        FSlateApplication::Get().PumpMessages();
+
+        FVector O, E;
+        TA->GetActorBounds(false, O, E);
+        const float TraceTop = (float)O.Z + (float)E.Z + 500.f;
+        const float TraceBot = (float)O.Z - (float)E.Z - 100.f;
+
+        for (float GX = (float)(O.X - E.X) + DebugStep * 0.5f;
+             GX <= (float)(O.X + E.X) && nTotal < MaxDebugPoints;
+             GX += DebugStep)
         {
-            // Surface detection — trace first, AABB fallback (grid-centre rule)
-            FHitResult Hit;
-            bool bFound = false;
-            FVector PassStart(GX, GY, TraceTop);
-            const FVector PassEnd(GX, GY, TraceBot);
-            for (int32 P = 0; P < 8 && !bFound; ++P)
+            for (float GY = (float)(O.Y - E.Y) + DebugStep * 0.5f;
+                 GY <= (float)(O.Y + E.Y) && nTotal < MaxDebugPoints;
+                 GY += DebugStep)
             {
-                if (!World->LineTraceSingleByChannel(Hit, PassStart, PassEnd, ECC_Visibility, QP))
-                    break;
-                AStaticMeshActor* HA = Cast<AStaticMeshActor>(Hit.GetActor());
-                if (HA && TargetActors.Contains(HA)) bFound = true;
-                else PassStart = Hit.Location - FVector(0,0,1);
-            }
-            if (!bFound)
-            {
-                for (AStaticMeshActor* TA : TargetActors)
+                // Deduplicate across overlapping actor AABBs
+                const int32 KX = FMath::RoundToInt(GX / DebugStep);
+                const int32 KY = FMath::RoundToInt(GY / DebugStep);
+                if (VisitedKeys.Contains({KX, KY})) continue;
+                VisitedKeys.Add({KX, KY});
+
+                // Surface detection — trace first, AABB fallback
+                FHitResult Hit;
+                bool bFound = false;
+                FVector PassStart(GX, GY, TraceTop);
+                const FVector PassEnd(GX, GY, TraceBot);
+                for (int32 P = 0; P < 8 && !bFound; ++P)
                 {
-                    FVector O, E; TA->GetActorBounds(false, O, E);
-                    if (GX < (float)(O.X-E.X) || GX > (float)(O.X+E.X)) continue;
-                    if (GY < (float)(O.Y-E.Y) || GY > (float)(O.Y+E.Y)) continue;
-                    Hit.Location = FVector(GX, GY, O.Z + E.Z);
-                    bFound = true; break;
+                    if (!World->LineTraceSingleByChannel(Hit, PassStart, PassEnd, ECC_Visibility, QP))
+                        break;
+                    AStaticMeshActor* HA = Cast<AStaticMeshActor>(Hit.GetActor());
+                    if (HA && TargetActors.Contains(HA)) bFound = true;
+                    else PassStart = Hit.Location - FVector(0,0,1);
                 }
-            }
-            if (!bFound) continue;
+                if (!bFound)
+                {
+                    Hit.Location = FVector(GX, GY, O.Z + E.Z);
+                    bFound = true;
+                }
 
-            // Boundary containment — same fixed check as RunGenerate:
-            // use GetBox() so non-centred mesh pivots are handled correctly.
-            bool bInside = false;
-            for (AStaticMeshActor* TA : TargetActors)
-            {
-                UStaticMeshComponent* SMC = TA->GetStaticMeshComponent();
-                if (!SMC) continue;
-                const FVector LP =
-                    SMC->GetComponentTransform().InverseTransformPosition(Hit.Location);
-                const FBox LB = SMC->CalcLocalBounds().GetBox();
-                if (LP.X >= LB.Min.X - 1.f && LP.X <= LB.Max.X + 1.f &&
-                    LP.Y >= LB.Min.Y - 1.f && LP.Y <= LB.Max.Y + 1.f)
-                { bInside = true; break; }
-            }
+                // Boundary containment — OccupiedCells-style: check each actor's
+                // local component bounds (same logic as RunGenerate boundary gate)
+                bool bInside = false;
+                for (AStaticMeshActor* CheckTA : TargetActors)
+                {
+                    UStaticMeshComponent* SMC = CheckTA->GetStaticMeshComponent();
+                    if (!SMC) continue;
+                    const FVector LP = SMC->GetComponentTransform().InverseTransformPosition(Hit.Location);
+                    const FBox    LB = SMC->CalcLocalBounds().GetBox();
+                    if (LP.X >= LB.Min.X - 1.f && LP.X <= LB.Max.X + 1.f &&
+                        LP.Y >= LB.Min.Y - 1.f && LP.Y <= LB.Max.Y + 1.f)
+                    { bInside = true; break; }
+                }
 
-            // Green = valid placement point, Red = outside mesh boundary
-            DrawDebugSphere(World, Hit.Location + FVector(0,0,5),
-                            8.f, 6, bInside ? FColor::Green : FColor::Red,
-                            /*bPersist=*/false, /*LifeTime=*/30.f);
-            bInside ? ++nGreen : ++nRed;
+                DrawDebugSphere(World, Hit.Location + FVector(0,0,5),
+                                8.f, 6, bInside ? FColor::Green : FColor::Red,
+                                /*bPersist=*/false, /*LifeTime=*/30.f);
+                bInside ? ++nGreen : ++nRed;
+                ++nTotal;
+            }
         }
     }
 
+    const bool bCapped = nTotal >= MaxDebugPoints;
     AppendLog(FString::Printf(
-        TEXT("Debug Points: %d green (valid) | %d red (outside boundary) — visible for 30 s"),
-        nGreen, nRed));
+        TEXT("Debug Points: %d green | %d red%s — visible for 30 s"),
+        nGreen, nRed,
+        bCapped ? TEXT("  [cap reached — select fewer actors for full coverage]") : TEXT("")));
 
     if (GEditor) GEditor->RedrawAllViewports(true);
     return FReply::Handled();
