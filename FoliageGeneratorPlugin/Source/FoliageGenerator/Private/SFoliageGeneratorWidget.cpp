@@ -31,6 +31,7 @@
 #include "Materials/MaterialInterface.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Misc/ScopedSlowTask.h"
+#include "StaticMeshResources.h"
 
 // ── Thumbnails ────────────────────────────────────────────────────────────────
 #include "AssetThumbnail.h"             // FAssetThumbnail, FAssetThumbnailPool
@@ -1670,6 +1671,134 @@ FReply SFoliageGeneratorWidget::OnDebugPointsClicked()
     return FReply::Handled();
 }
 
+// ─── RAII Collision Guard ────────────────────────────────────────────────────
+// Guarantees collision state is restored even if RunGenerate exits early via
+// return, user cancel, or exception. The destructor runs unconditionally.
+
+struct FScopedCollisionModifier
+{
+    struct FSavedState
+    {
+        UStaticMeshComponent*   SMC;
+        ECollisionEnabled::Type OrigEnabled;
+        FName                   OrigProfile;
+    };
+    TArray<FSavedState> Modifications;
+
+    void Apply(UStaticMeshComponent* InSMC)
+    {
+        if (!InSMC) return;
+        FSavedState& S = Modifications.AddDefaulted_GetRef();
+        S.SMC         = InSMC;
+        S.OrigEnabled = InSMC->GetCollisionEnabled();
+        S.OrigProfile = InSMC->GetCollisionProfileName();
+        InSMC->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+        InSMC->SetCollisionResponseToAllChannels(ECollisionResponse::ECR_Block);
+        InSMC->SetCollisionObjectType(ECollisionChannel::ECC_WorldStatic);
+    }
+
+    ~FScopedCollisionModifier()
+    {
+        for (const FSavedState& S : Modifications)
+        {
+            if (IsValid(S.SMC))
+            {
+                S.SMC->SetCollisionEnabled(S.OrigEnabled);
+                S.SMC->SetCollisionProfileName(S.OrigProfile);
+            }
+        }
+    }
+
+    // Non-copyable
+    FScopedCollisionModifier() = default;
+    FScopedCollisionModifier(const FScopedCollisionModifier&) = delete;
+    FScopedCollisionModifier& operator=(const FScopedCollisionModifier&) = delete;
+};
+
+// ─── CPU Triangle Raycast ────────────────────────────────────────────────────
+// Fires a downward ray against the raw render-mesh triangles using
+// Möller–Trumbore intersection.  Accurate on sloped / uneven surfaces even
+// when the StaticMesh has "No Collision" set at the asset level.
+// Returns true if any triangle was hit; OutLocation and OutNormal are in world
+// space.  Falls through to false for meshes with no accessible render data or
+// for extreme poly counts (> 200 k tris) where the AABB fallback is faster.
+
+static bool RaycastMeshCPU(
+    UStaticMeshComponent* SMC,
+    float WorldX, float WorldY,
+    float RayTop,
+    FVector& OutLocation, FVector& OutNormal)
+{
+    if (!SMC) return false;
+    UStaticMesh* Mesh = SMC->GetStaticMesh();
+    if (!Mesh) return false;
+    FStaticMeshRenderData* RD = Mesh->GetRenderData();
+    if (!RD || RD->LODResources.Num() == 0) return false;
+
+    const FStaticMeshLODResources& LOD  = RD->LODResources[0];
+    const FPositionVertexBuffer&   PVB  = LOD.VertexBuffers.PositionVertexBuffer;
+
+    TArray<uint32> Indices;
+    LOD.IndexBuffer.GetCopy(Indices);
+    const int32 NumTris = Indices.Num() / 3;
+    if (NumTris == 0 || NumTris > 200000) return false;   // sanity / perf guard
+
+    const FTransform& CompT = SMC->GetComponentTransform();
+
+    // Ray in world space — straight down from RayTop
+    const FVector RayOriginW(WorldX, WorldY, RayTop);
+    const FVector RayDirW   (0.f, 0.f, -1.f);
+
+    // Transform ray into component local space (Möller–Trumbore works in local)
+    const FVector RayOriginL = CompT.InverseTransformPosition(RayOriginW);
+    FVector       RayDirL    = CompT.InverseTransformVector(RayDirW);
+    const float   DirLen     = RayDirL.Size();
+    if (DirLen < KINDA_SMALL_NUMBER) return false;
+    RayDirL /= DirLen;   // normalise (non-uniform scale can stretch direction)
+
+    float   BestT       = FLT_MAX;
+    FVector BestNormalL = FVector::UpVector;
+    bool    bHit        = false;
+
+    for (int32 Ti = 0; Ti < NumTris; ++Ti)
+    {
+        const FVector V0(PVB.VertexPosition(Indices[Ti * 3 + 0]));
+        const FVector V1(PVB.VertexPosition(Indices[Ti * 3 + 1]));
+        const FVector V2(PVB.VertexPosition(Indices[Ti * 3 + 2]));
+
+        const FVector E1 = V1 - V0;
+        const FVector E2 = V2 - V0;
+        const FVector H  = FVector::CrossProduct(RayDirL, E2);
+        const float   A  = FVector::DotProduct(E1, H);
+        if (FMath::Abs(A) < 1e-6f) continue;           // parallel
+
+        const float   F  = 1.f / A;
+        const FVector S  = RayOriginL - V0;
+        const float   U  = F * FVector::DotProduct(S, H);
+        if (U < 0.f || U > 1.f) continue;
+
+        const FVector Q  = FVector::CrossProduct(S, E1);
+        const float   V  = F * FVector::DotProduct(RayDirL, Q);
+        if (V < 0.f || U + V > 1.f) continue;
+
+        const float T = F * FVector::DotProduct(E2, Q);
+        if (T > 0.f && T < BestT)
+        {
+            BestT       = T;
+            BestNormalL = FVector::CrossProduct(E1, E2).GetSafeNormal();
+            bHit        = true;
+        }
+    }
+
+    if (!bHit) return false;
+
+    const FVector LocalHit = RayOriginL + RayDirL * BestT;
+    OutLocation = CompT.TransformPosition(LocalHit);
+    OutNormal   = CompT.TransformVectorNoScale(BestNormalL).GetSafeNormal();
+    if (OutNormal.Z < 0.f) OutNormal = -OutNormal;   // always face upward
+    return true;
+}
+
 // ─── RunGenerate ─────────────────────────────────────────────────────────────
 
 void SFoliageGeneratorWidget::RunGenerate()
@@ -1750,80 +1879,33 @@ void SFoliageGeneratorWidget::RunGenerate()
     }
     AppendLog(FString::Printf(TEXT("Found %d surface actor(s)."), TargetActors.Num()));
 
-    // ── Temporarily enable collision on building-like actors ─────────────────
-    // Buildings in arch-viz scenes usually have collision disabled.
-    // We force QueryOnly on every non-target actor taller than 50 cm so that
-    // sphere sweeps can detect them during clearance checks.
-    // Original settings are restored via RestoreCollision() after all loops.
-    struct FSavedCollision
+    // RAII guard — destructor restores collision unconditionally even on
+    // early return, user cancel, or exception.
+    FScopedCollisionModifier CollisionGuard;
     {
-        UStaticMeshComponent*   SMC;
-        ECollisionEnabled::Type OrigEnabled;
-        FName                   OrigProfile;
-    };
-    TArray<FSavedCollision> CollisionRestoreList;
-    {
-        // ── Enable collision on target surface actors ─────────────────────────
-        // In arch-viz scenes the grass/paving meshes are often purely visual
-        // (NoCollision or custom profile with QueryOnly disabled).  Without
-        // collision enabled on them, every ECC_Visibility trace passes straight
-        // through and the occupancy grid sees zero target cells.
+        // Enable collision on target surface actors
         for (AStaticMeshActor* A : TargetActors)
         {
             UStaticMeshComponent* SMC = A->GetStaticMeshComponent();
-            if (!SMC) continue;
-
-            FSavedCollision Saved;
-            Saved.SMC         = SMC;
-            Saved.OrigEnabled = SMC->GetCollisionEnabled();
-            Saved.OrigProfile = SMC->GetCollisionProfileName();
-            CollisionRestoreList.Add(Saved);
-
-            SMC->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
-            SMC->SetCollisionResponseToAllChannels(ECollisionResponse::ECR_Block);
-            SMC->SetCollisionObjectType(ECollisionChannel::ECC_WorldStatic);
+            CollisionGuard.Apply(SMC);
         }
 
-        // ── Enable collision on building-like obstacle actors ─────────────────
+        // Enable collision on building-like obstacle actors
         const float MinHalfHeight = 25.f;
         for (TActorIterator<AStaticMeshActor> It(World); It; ++It)
         {
             AStaticMeshActor* A = *It;
             if (!IsValid(A) || TargetActors.Contains(A)) continue;
-
             FVector Orig, Ext;
             A->GetActorBounds(false, Orig, Ext);
             if (Ext.Z < MinHalfHeight) continue;
-
             UStaticMeshComponent* SMC = A->GetStaticMeshComponent();
-            if (!SMC) continue;
-
-            FSavedCollision Saved;
-            Saved.SMC         = SMC;
-            Saved.OrigEnabled = SMC->GetCollisionEnabled();
-            Saved.OrigProfile = SMC->GetCollisionProfileName();
-            CollisionRestoreList.Add(Saved);
-
-            SMC->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
-            SMC->SetCollisionResponseToAllChannels(ECollisionResponse::ECR_Block);
-            SMC->SetCollisionObjectType(ECollisionChannel::ECC_WorldStatic);
+            CollisionGuard.Apply(SMC);
         }
         AppendLog(FString::Printf(
             TEXT("Collision enabled on %d actor(s) (%d surface + obstacles) for traces."),
-            CollisionRestoreList.Num(), TargetActors.Num()));
+            CollisionGuard.Modifications.Num(), TargetActors.Num()));
     }
-
-    auto RestoreCollision = [&CollisionRestoreList]()
-    {
-        for (const FSavedCollision& S : CollisionRestoreList)
-        {
-            if (IsValid(S.SMC))
-            {
-                S.SMC->SetCollisionEnabled(S.OrigEnabled);
-                S.SMC->SetCollisionProfileName(S.OrigProfile);
-            }
-        }
-    };
 
     // 3. Collect enabled entries from the FULL list (not the filtered view)
     TArray<TSharedPtr<FFoliageEntry>> Enabled;
@@ -1906,21 +1988,13 @@ void SFoliageGeneratorWidget::RunGenerate()
         GW, GH, CellSize, GTot));
     FSlateApplication::Get().PumpMessages();
 
-    // ── Step 1: Occupancy ─────────────────────────────────────────────────────
-    //
-    //  Grass/paving meshes in arch-viz scenes are almost always set to
-    //  "No Collision" at the asset level — no physics body is ever baked, so
-    //  even after calling SetCollisionEnabled(QueryOnly) on the component the
-    //  line-trace system finds nothing.
-    //
-    //  Instead, we classify each grid cell by checking whether its (X,Y) centre
-    //  falls inside the world-space AABB footprint of any target actor.  This is
-    //  physics-system-independent and perfectly accurate for rectangular patches.
-    //  The placement traces still confirm the exact Z hit and surface normal.
-    TArray<bool> OccGrid;
-    OccGrid.SetNumZeroed(GTot);
+    // ── Step 1: Sparse Occupancy Set ─────────────────────────────────────────
+    // Uses TSet<FIntPoint> instead of a flat bool array so that only cells
+    // that actually contain mesh footprints consume memory.  Accurate for any
+    // scene size at constant 100 cm resolution.
+    TSet<FIntPoint> OccupiedCells;
+    OccupiedCells.Reserve(GTot);
     {
-        // Pre-build per-actor 2-D axis-aligned footprints (world XY).
         struct FFootprint2D { float MinX, MinY, MaxX, MaxY; };
         TArray<FFootprint2D> Footprints;
         Footprints.Reserve(TargetActors.Num());
@@ -1928,7 +2002,6 @@ void SFoliageGeneratorWidget::RunGenerate()
         {
             FVector Orig, Ext;
             A->GetActorBounds(false, Orig, Ext);
-            // Small inset so edge-cells on paper-thin borders don't count.
             const float Margin = CellSize * 0.5f;
             Footprints.Add({ (float)(Orig.X - Ext.X) + Margin, (float)(Orig.Y - Ext.Y) + Margin,
                              (float)(Orig.X + Ext.X) - Margin, (float)(Orig.Y + Ext.Y) - Margin });
@@ -1941,86 +2014,77 @@ void SFoliageGeneratorWidget::RunGenerate()
             {
                 const float CX = GMinX + (ix + 0.5f) * CellSize;
                 const float CY = GMinY + (iy + 0.5f) * CellSize;
-                bool bIsTarget = false;
                 for (const FFootprint2D& FP : Footprints)
                 {
                     if (CX >= FP.MinX && CX <= FP.MaxX &&
                         CY >= FP.MinY && CY <= FP.MaxY)
                     {
-                        bIsTarget = true;
+                        OccupiedCells.Add(FIntPoint(ix, iy));
                         break;
                     }
                 }
-                OccGrid[iy * GW + ix] = bIsTarget;
             }
         }
     }
 
-    // ── Step 2: Distance transform (multi-source BFS) ────────────────────────
-    //
-    //  Every target cell gets its Manhattan distance (in cm) to the nearest
-    //  non-target cell.  This directly measures the LOCAL HALF-WIDTH at any point:
-    //
-    //    Point at centre of a 10 m × 10 m courtyard  → distance ≈ 500 cm
-    //    Point at centre of a  5 m ×  5 m courtyard  → distance ≈ 250 cm
-    //    Point at centre of a  1 m corridor           → distance ≈  50 cm
-    //
-    //  WHY this beats erosion+flood-fill:
-    //    Erosion removes ANY cell within 1 cell of a boundary, so narrow courtyards
-    //    (< 3 cells / 372 cm at 124 cm resolution) are fully erased → 0 components.
-    //    The distance transform never erases anything; it just assigns a score.
-    //
-    //  Classification uses HALF-THRESHOLDS so the threshold sliders stay intuitive:
-    //    "Large ≥ 1000 cm" means the patch must be ≥ 1000 cm wide,
-    //    which means its centre distance must be ≥ 500 cm.
-
-    TArray<float> DistGrid;
-    DistGrid.Init(FLT_MAX, GTot);
+    // ── Step 2: Sparse Distance Transform (multi-source BFS) ─────────────────
+    // Seeds BFS from occupied cells that border a non-occupied neighbour
+    // (boundary cells, distance = 0).  Interior cells are filled by wavefront
+    // expansion.  Only occupied cells consume map entries.
+    TMap<FIntPoint, float> DistMap;
+    DistMap.Reserve(OccupiedCells.Num());
     {
-        // Seed BFS from every non-target cell (distance = 0 at boundaries)
-        TArray<int32> Q;
-        Q.Reserve(GTot);
-        for (int32 i = 0; i < GTot; ++i)
+        TArray<FIntPoint> BFSQueue;
+        BFSQueue.Reserve(OccupiedCells.Num());
+
+        // Seed: occupied cells with at least one non-occupied 4-neighbour
+        for (const FIntPoint& Cell : OccupiedCells)
         {
-            if (!OccGrid[i])
+            const FIntPoint Nb[4] = {
+                {Cell.X-1, Cell.Y}, {Cell.X+1, Cell.Y},
+                {Cell.X, Cell.Y-1}, {Cell.X, Cell.Y+1}
+            };
+            bool bIsBoundary = false;
+            for (const FIntPoint& N : Nb)
+                if (!OccupiedCells.Contains(N)) { bIsBoundary = true; break; }
+
+            if (bIsBoundary)
             {
-                DistGrid[i] = 0.f;
-                Q.Add(i);
+                DistMap.Add(Cell, 0.f);
+                BFSQueue.Add(Cell);
             }
         }
 
-        // Wavefront expansion: 4-connected, each step costs CellSize cm
-        for (int32 qi = 0; qi < Q.Num(); ++qi)
+        // Wavefront expansion: each step costs CellSize cm
+        for (int32 qi = 0; qi < BFSQueue.Num(); ++qi)
         {
-            const int32 Cur     = Q[qi];
-            const float NewDist = DistGrid[Cur] + CellSize;
-            const int32 cy      = Cur / GW, cx = Cur % GW;
-
-            const int32 Nb[4] = {
-                cy>0    ? (cy-1)*GW+cx : -1,
-                cy<GH-1 ? (cy+1)*GW+cx : -1,
-                cx>0    ? cy*GW+(cx-1) : -1,
-                cx<GW-1 ? cy*GW+(cx+1) : -1,
+            const FIntPoint& Cur     = BFSQueue[qi];
+            const float      NewDist = DistMap[Cur] + CellSize;
+            const FIntPoint  Nb[4]   = {
+                {Cur.X-1, Cur.Y}, {Cur.X+1, Cur.Y},
+                {Cur.X, Cur.Y-1}, {Cur.X, Cur.Y+1}
             };
-            for (int32 N : Nb)
+            for (const FIntPoint& N : Nb)
             {
-                if (N >= 0 && NewDist < DistGrid[N])
+                if (!OccupiedCells.Contains(N)) continue;
+                float& ExistDist = DistMap.FindOrAdd(N, FLT_MAX);
+                if (NewDist < ExistDist)
                 {
-                    DistGrid[N] = NewDist;
-                    Q.Add(N);
+                    ExistDist = NewDist;
+                    BFSQueue.Add(N);
                 }
             }
         }
     }
 
-    // Log distribution for the user
     if (bPatchSizeFilter)
     {
         int32 PC[4] = {};
-        for (int32 i = 0; i < GTot; ++i)
+        for (const FIntPoint& Cell : OccupiedCells)
         {
-            if (!OccGrid[i] || DistGrid[i] >= FLT_MAX * 0.5f) continue;
-            const float D = DistGrid[i];
+            const float* DP = DistMap.Find(Cell);
+            if (!DP) continue;
+            const float D = *DP;
             if      (D >= PatchThresholdLarge  * 0.5f) ++PC[0];
             else if (D >= PatchThresholdMedium * 0.5f) ++PC[1];
             else if (D >= PatchThresholdSmall  * 0.5f) ++PC[2];
@@ -2031,14 +2095,15 @@ void SFoliageGeneratorWidget::RunGenerate()
             PC[0], PC[1], PC[2], PC[3]));
     }
 
-    // ── O(1) lookup: world XY → local half-width → category ──────────────────
+    // O(1) lookup: world XY → patch category using sparse structures
     auto GetPatchAt = [&](float WX, float WY) -> TOptional<EFoliageCategory>
     {
-        const int32 ix = FMath::Clamp(FMath::FloorToInt((WX - GMinX) / CellSize), 0, GW-1);
-        const int32 iy = FMath::Clamp(FMath::FloorToInt((WY - GMinY) / CellSize), 0, GH-1);
-        if (!OccGrid[iy * GW + ix]) return {};
-
-        const float D = DistGrid[iy * GW + ix];
+        const FIntPoint Cell(
+            FMath::FloorToInt((WX - GMinX) / CellSize),
+            FMath::FloorToInt((WY - GMinY) / CellSize));
+        if (!OccupiedCells.Contains(Cell)) return {};
+        const float* DP = DistMap.Find(Cell);
+        const float  D  = DP ? *DP : 0.f;
         if (D >= PatchThresholdLarge  * 0.5f) return EFoliageCategory::LargeTree;
         if (D >= PatchThresholdMedium * 0.5f) return EFoliageCategory::MediumTree;
         if (D >= PatchThresholdSmall  * 0.5f) return EFoliageCategory::SmallTree;
@@ -2150,33 +2215,53 @@ void SFoliageGeneratorWidget::RunGenerate()
         // generations (or earlier in this run) never intercept the trace.
         QP.AddIgnoredActor(IFA);
 
-        // ── Unified grid over combined AABB ───────────────────────────────────
-        // Start half a cell in from each edge so the first grid centre sits
-        // inside the patch rather than at the raw AABB corner.  This keeps
-        // every grid point inside the patch even on small patches where only
-        // one cell fits along a given axis.
-        for (float GX = CombinedBounds.Min.X + Spacing * 0.5f;
-             GX <= CombinedBounds.Max.X && !bCapReached;
-             GX += Spacing)
+        // ── Per-actor grid walk — avoids scanning empty space between patches ──
+        // Grid centres are collected per-actor bounds and deduplicated so that
+        // overlapping actor AABBs never generate duplicate candidates.
+        TSet<TPair<int32,int32>> VisitedGridKeys;
+        TArray<FVector2D> GridPoints;
+        for (AStaticMeshActor* TA : TargetActors)
         {
-            if (Progress.ShouldCancel()) { bUserCancelled = true; break; }
-
-            for (float GY = CombinedBounds.Min.Y + Spacing * 0.5f;
-                 GY <= CombinedBounds.Max.Y;
-                 GY += Spacing)
+            FVector Orig, Ext;
+            TA->GetActorBounds(false, Orig, Ext);
+            for (float GX0 = (float)(Orig.X - Ext.X) + Spacing * 0.5f;
+                 GX0 <= (float)(Orig.X + Ext.X);
+                 GX0 += Spacing)
             {
-                // Yield every 500 traces to keep the UI alive
-                if (++TraceCounter % 500 == 0)
+                for (float GY0 = (float)(Orig.Y - Ext.Y) + Spacing * 0.5f;
+                     GY0 <= (float)(Orig.Y + Ext.Y);
+                     GY0 += Spacing)
                 {
-                    FSlateApplication::Get().PumpMessages();
-                    if (Progress.ShouldCancel()) { bUserCancelled = true; break; }
+                    const int32 KX = FMath::RoundToInt(GX0 / Spacing);
+                    const int32 KY = FMath::RoundToInt(GY0 / Spacing);
+                    if (!VisitedGridKeys.Contains({KX, KY}))
+                    {
+                        VisitedGridKeys.Add({KX, KY});
+                        GridPoints.Add(FVector2D(GX0, GY0));
+                    }
                 }
-                if (Instances.Num() >= MaxInstancesPerType) { bCapReached = true; break; }
+            }
+        }
 
-                // Jittered sample point
-                const float PX = GX + Rng.FRandRange(-Jitter, Jitter);
-                const float PY = GY + Rng.FRandRange(-Jitter, Jitter);
-                ++DbgCandidates;
+        for (const FVector2D& GridPt : GridPoints)
+        {
+            if (bCapReached || bUserCancelled) break;
+            if (Progress.ShouldCancel()) { bUserCancelled = true; break; }
+            if (Instances.Num() >= MaxInstancesPerType) { bCapReached = true; break; }
+
+            if (++TraceCounter % 500 == 0)
+            {
+                FSlateApplication::Get().PumpMessages();
+                if (Progress.ShouldCancel()) { bUserCancelled = true; break; }
+            }
+
+            const float GX = GridPt.X;
+            const float GY = GridPt.Y;
+
+            // Jittered sample point
+            const float PX = GX + Rng.FRandRange(-Jitter, Jitter);
+            const float PY = GY + Rng.FRandRange(-Jitter, Jitter);
+            ++DbgCandidates;
 
                 // Downward trace — step past any non-target hits (invisible
                 // collision meshes, BSP proxies, etc.) until we land on an actor
@@ -2205,16 +2290,13 @@ void SFoliageGeneratorWidget::RunGenerate()
                 // this is exact; the actor's up-vector gives the correct normal.
                 if (!bFoundTarget)
                 {
-                    // Arch-viz meshes with "No Collision" at the asset level have
-                    // no physics body, so traces always miss them.  Recover via the
-                    // actor's world-space AABB.
-                    //
-                    // Strict rule: only accept if the RAW GRID CENTRE (GX,GY) was
-                    // already inside the actor footprint.  Jitter may have pushed
-                    // the sample point (PX,PY) slightly outside — we clamp it back
-                    // in.  Grid centres that were outside the patch (i.e. over the
-                    // surrounding deck / path) are intentionally rejected so that
-                    // plants never appear outside the selected face.
+                    // Arch-viz meshes have no physics body — traces miss them.
+                    // Recover by firing a CPU ray against the raw render triangles
+                    // (accurate on slopes/hills).  Fall back to the AABB top face
+                    // when render data is unavailable or the mesh is too dense.
+                    // Only accepts if the RAW GRID CENTRE (GX,GY) was inside the
+                    // actor footprint — jitter-pushed points are clamped, but grid
+                    // centres that were outside are rejected entirely.
                     for (AStaticMeshActor* TA : TargetActors)
                     {
                         FVector Orig, Ext;
@@ -2223,55 +2305,45 @@ void SFoliageGeneratorWidget::RunGenerate()
                         const float FMaxX = (float)(Orig.X + Ext.X);
                         const float FMinY = (float)(Orig.Y - Ext.Y);
                         const float FMaxY = (float)(Orig.Y + Ext.Y);
+                        if (GX < FMinX || GX > FMaxX || GY < FMinY || GY > FMaxY) continue;
 
-                        // Grid centre must be inside — jitter is then clamped back
-                        if (GX < FMinX || GX > FMaxX) continue;
-                        if (GY < FMinY || GY > FMaxY) continue;
-
-                        const float CX = FMath::Clamp(PX, FMinX, FMaxX);
-                        const float CY = FMath::Clamp(PY, FMinY, FMaxY);
-                        const FVector SurfaceNormal = TA->GetActorUpVector();
-                        Hit.Location     = FVector(CX, CY, Orig.Z + Ext.Z);
-                        Hit.Normal       = SurfaceNormal;
-                        Hit.ImpactNormal = SurfaceNormal;
-                        bFoundTarget     = true;
+                        UStaticMeshComponent* SMC = TA->GetStaticMeshComponent();
+                        FVector RayHitLoc, RayHitNorm;
+                        if (SMC && RaycastMeshCPU(SMC, PX, PY, TraceTop, RayHitLoc, RayHitNorm))
+                        {
+                            // Accurate triangle intersection — correct Z on slopes
+                            Hit.Location     = RayHitLoc;
+                            Hit.Normal       = RayHitNorm;
+                            Hit.ImpactNormal = RayHitNorm;
+                        }
+                        else
+                        {
+                            // Flat-top AABB fallback (rectangular patches, no render data)
+                            const float CX = FMath::Clamp(PX, FMinX, FMaxX);
+                            const float CY = FMath::Clamp(PY, FMinY, FMaxY);
+                            const FVector N = TA->GetActorUpVector();
+                            Hit.Location     = FVector(CX, CY, Orig.Z + Ext.Z);
+                            Hit.Normal       = N;
+                            Hit.ImpactNormal = N;
+                        }
+                        bFoundTarget = true;
                         break;
                     }
                 }
 
                 if (!bFoundTarget) { ++DbgNoSurface; continue; }
 
-                // ── Hard boundary gate — local-space containment ──────────────
-                // Reject any point whose final world XY falls outside every
-                // target actor's actual mesh footprint, using the actor's local
-                // transform so that rotated patches are handled correctly.
-                // This is the definitive guard that prevents plants from
-                // appearing outside the selected face regardless of how the
-                // hit location was determined (trace or AABB fallback).
+                // ── Hard boundary gate — OccupiedCells lookup ─────────────────
+                // The occupancy grid was built directly from mesh footprints, so
+                // it accurately represents the actual surface shape including
+                // L-shapes, courtyards, and concave outlines — unlike any bounding
+                // box approximation.  O(1) TSet lookup.
                 {
-                    bool bInsideAny = false;
-                    for (AStaticMeshActor* TA : TargetActors)
-                    {
-                        UStaticMeshComponent* SMC = TA->GetStaticMeshComponent();
-                        if (!SMC) continue;
-                        // Transform world hit into component local space, then
-                        // compare against the mesh's LOCAL bounding box.
-                        // CalcLocalBounds().GetBox() gives FBox(Origin-Ext,
-                        // Origin+Ext) which correctly handles meshes whose local
-                        // pivot is NOT at the bounding-box centre (very common in
-                        // arch-viz assets).  Ignoring Z lets flat planes pass.
-                        const FVector LocalPt =
-                            SMC->GetComponentTransform().InverseTransformPosition(Hit.Location);
-                        const FBox LocalBox = SMC->CalcLocalBounds().GetBox();
-                        // 1 cm tolerance absorbs float precision at edges
-                        if (LocalPt.X >= LocalBox.Min.X - 1.f && LocalPt.X <= LocalBox.Max.X + 1.f &&
-                            LocalPt.Y >= LocalBox.Min.Y - 1.f && LocalPt.Y <= LocalBox.Max.Y + 1.f)
-                        {
-                            bInsideAny = true;
-                            break;
-                        }
-                    }
-                    if (!bInsideAny) { ++DbgNoSurface; continue; }
+                    const FIntPoint HitCell(
+                        FMath::FloorToInt((Hit.Location.X - GMinX) / CellSize),
+                        FMath::FloorToInt((Hit.Location.Y - GMinY) / CellSize));
+                    if (!OccupiedCells.Contains(HitCell))
+                    { ++DbgNoSurface; continue; }
                 }
 
                 // ── Patch allowance check (O(1) grid lookup) ─────────────────
@@ -2345,7 +2417,7 @@ void SFoliageGeneratorWidget::RunGenerate()
                     FCollisionQueryParams SpearQP(NAME_None, /*bTraceComplex=*/false);
                     for (AActor* TA : TargetActorSet) SpearQP.AddIgnoredActor(TA);
                     SpearQP.AddIgnoredActor(IFA);
-                    for (const FSavedCollision& SC : CollisionRestoreList)
+                    for (const FScopedCollisionModifier::FSavedState& SC : CollisionGuard.Modifications)
                         if (SC.SMC) SpearQP.AddIgnoredActor(SC.SMC->GetOwner());
 
                     FHitResult SpearHit;
@@ -2385,7 +2457,7 @@ void SFoliageGeneratorWidget::RunGenerate()
                 {
                     FCollisionQueryParams CanopyQP(NAME_None, /*bTraceComplex=*/false);
                     CanopyQP.AddIgnoredActor(IFA);
-                    for (const FSavedCollision& SC : CollisionRestoreList)
+                    for (const FScopedCollisionModifier::FSavedState& SC : CollisionGuard.Modifications)
                         if (SC.SMC) CanopyQP.AddIgnoredActor(SC.SMC->GetOwner());
 
                     FHitResult CanopyHit;
@@ -2411,8 +2483,6 @@ void SFoliageGeneratorWidget::RunGenerate()
                 Inst.DrawScale3D = FVector3f(Scale, Scale, Scale);
                 RegisterPlacedPoint(Hit.Location.X, Hit.Location.Y, HalfSp);
                 Instances.Add(MoveTemp(Inst));
-            }
-            if (bUserCancelled) break;
         }
 
         if (Instances.IsEmpty())
@@ -2443,8 +2513,6 @@ void SFoliageGeneratorWidget::RunGenerate()
     {
         AppendLog(TEXT("⚠  Generation cancelled by user."));
     }
-
-    RestoreCollision();
 
     IFA->PostEditChange();
     IFA->MarkPackageDirty();
