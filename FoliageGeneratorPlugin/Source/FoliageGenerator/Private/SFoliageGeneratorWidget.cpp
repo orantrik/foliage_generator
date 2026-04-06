@@ -2012,13 +2012,17 @@ void SFoliageGeneratorWidget::RunGenerate()
         QP.AddIgnoredActor(IFA);
 
         // ── Unified grid over combined AABB ───────────────────────────────────
-        for (float GX = CombinedBounds.Min.X;
+        // Start half a cell in from each edge so the first grid centre sits
+        // inside the patch rather than at the raw AABB corner.  This keeps
+        // every grid point inside the patch even on small patches where only
+        // one cell fits along a given axis.
+        for (float GX = CombinedBounds.Min.X + Spacing * 0.5f;
              GX <= CombinedBounds.Max.X && !bCapReached;
              GX += Spacing)
         {
             if (Progress.ShouldCancel()) { bUserCancelled = true; break; }
 
-            for (float GY = CombinedBounds.Min.Y;
+            for (float GY = CombinedBounds.Min.Y + Spacing * 0.5f;
                  GY <= CombinedBounds.Max.Y;
                  GY += Spacing)
             {
@@ -2062,13 +2066,16 @@ void SFoliageGeneratorWidget::RunGenerate()
                 // this is exact; the actor's up-vector gives the correct normal.
                 if (!bFoundTarget)
                 {
-                    // Find the target actor whose AABB is closest to (PX,PY).
-                    // We clamp rather than reject so that jitter never evicts the
-                    // only candidate on a small patch.
-                    float   BestDist2 = FLT_MAX;
-                    AStaticMeshActor* BestTA = nullptr;
-                    float   BestCX = PX, BestCY = PY;
-                    FVector BestOrig, BestExt;
+                    // Arch-viz meshes with "No Collision" at the asset level have
+                    // no physics body, so traces always miss them.  Recover via the
+                    // actor's world-space AABB.
+                    //
+                    // Strict rule: only accept if the RAW GRID CENTRE (GX,GY) was
+                    // already inside the actor footprint.  Jitter may have pushed
+                    // the sample point (PX,PY) slightly outside — we clamp it back
+                    // in.  Grid centres that were outside the patch (i.e. over the
+                    // surrounding deck / path) are intentionally rejected so that
+                    // plants never appear outside the selected face.
                     for (AStaticMeshActor* TA : TargetActors)
                     {
                         FVector Orig, Ext;
@@ -2077,34 +2084,50 @@ void SFoliageGeneratorWidget::RunGenerate()
                         const float FMaxX = (float)(Orig.X + Ext.X);
                         const float FMinY = (float)(Orig.Y - Ext.Y);
                         const float FMaxY = (float)(Orig.Y + Ext.Y);
-                        // Clamp candidate to this actor's footprint
+
+                        // Grid centre must be inside — jitter is then clamped back
+                        if (GX < FMinX || GX > FMaxX) continue;
+                        if (GY < FMinY || GY > FMaxY) continue;
+
                         const float CX = FMath::Clamp(PX, FMinX, FMaxX);
                         const float CY = FMath::Clamp(PY, FMinY, FMaxY);
-                        const float Dx = PX - CX, Dy = PY - CY;
-                        const float D2 = Dx*Dx + Dy*Dy;
-                        if (D2 < BestDist2)
-                        {
-                            BestDist2 = D2;
-                            BestTA    = TA;
-                            BestCX    = CX;
-                            BestCY    = CY;
-                            BestOrig  = Orig;
-                            BestExt   = Ext;
-                        }
-                    }
-                    // Accept if the clamped point is ON the mesh (D2==0) or
-                    // the jitter pushed us just off the edge (D2 ≤ Jitter²)
-                    if (BestTA && BestDist2 <= Jitter * Jitter)
-                    {
-                        const FVector SurfaceNormal = BestTA->GetActorUpVector();
-                        Hit.Location     = FVector(BestCX, BestCY, BestOrig.Z + BestExt.Z);
+                        const FVector SurfaceNormal = TA->GetActorUpVector();
+                        Hit.Location     = FVector(CX, CY, Orig.Z + Ext.Z);
                         Hit.Normal       = SurfaceNormal;
                         Hit.ImpactNormal = SurfaceNormal;
-                        bFoundTarget = true;
+                        bFoundTarget     = true;
+                        break;
                     }
                 }
 
                 if (!bFoundTarget) { ++DbgNoSurface; continue; }
+
+                // ── Hard boundary gate — local-space containment ──────────────
+                // Reject any point whose final world XY falls outside every
+                // target actor's actual mesh footprint, using the actor's local
+                // transform so that rotated patches are handled correctly.
+                // This is the definitive guard that prevents plants from
+                // appearing outside the selected face regardless of how the
+                // hit location was determined (trace or AABB fallback).
+                {
+                    bool bInsideAny = false;
+                    for (AStaticMeshActor* TA : TargetActors)
+                    {
+                        UStaticMeshComponent* SMC = TA->GetStaticMeshComponent();
+                        if (!SMC) continue;
+                        const FVector LocalPt =
+                            TA->GetActorTransform().InverseTransformPosition(Hit.Location);
+                        const FBoxSphereBounds LB = SMC->CalcLocalBounds();
+                        // 1 cm tolerance absorbs float precision
+                        if (FMath::Abs(LocalPt.X) <= LB.BoxExtent.X + 1.f &&
+                            FMath::Abs(LocalPt.Y) <= LB.BoxExtent.Y + 1.f)
+                        {
+                            bInsideAny = true;
+                            break;
+                        }
+                    }
+                    if (!bInsideAny) { ++DbgNoSurface; continue; }
+                }
 
                 // ── Patch allowance check (O(1) grid lookup) ─────────────────
                 if (bPatchSizeFilter)
