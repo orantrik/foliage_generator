@@ -1907,12 +1907,15 @@ void SFoliageGeneratorWidget::RunGenerate()
         return;
     }
 
-    // Sort largest-spacing-first so large trees claim territory before smaller
-    // plants fill the gaps. Without this, dense shrubs (220 cm grid) register
-    // so many positions in the spatial hash that subsequent tree candidates —
-    // which need HalfSp_shrub + HalfSp_tree clearance — are always rejected.
+    // Sort by ecological hierarchy: large trees first, flowers last.
+    // This ensures each tier claims its territory before the next tier fills
+    // the gaps.  Within the same category, larger spacing wins (denser species
+    // placed before compact ones of the same tier).
     Enabled.Sort([](const TSharedPtr<FFoliageEntry>& A, const TSharedPtr<FFoliageEntry>& B)
     {
+        const int32 CatA = static_cast<int32>(A->Category);
+        const int32 CatB = static_cast<int32>(B->Category);
+        if (CatA != CatB) return CatA < CatB;  // LargeTree(0) before Flower(4)
         return FMath::Max(A->OverrideSpacing, 10.f) > FMath::Max(B->OverrideSpacing, 10.f);
     });
 
@@ -1998,28 +2001,57 @@ void SFoliageGeneratorWidget::RunGenerate()
     FRandomStream Rng(Seed);
 
     // ─── Cross-foliage spatial hash ───────────────────────────────────────────
-    // Each placed instance claims a circle of radius = Spacing/2.
-    // A candidate from any foliage type is rejected if it falls within
-    // (thisRadius + existingRadius) of any already-placed point.
     //
-    // BucketSize = max spacing across all enabled types so that a 3×3 bucket
-    // neighbourhood always covers the full conflict radius (≤ 2 × BucketSize).
+    // Two-radius model for hierarchical under-canopy planting:
+    //
+    //   HalfSpacing  — full exclusion radius used between plants of the SAME
+    //                  or LARGER category (enforces design spacing).
+    //   StemRadius   — tight trunk clearance used when a SMALLER plant (higher
+    //                  category index) checks against a LARGER already-placed
+    //                  plant.  This lets shrubs/flowers grow under tree canopies
+    //                  while still keeping clear of the trunk.
+    //
+    // Rule: when placing category C near an existing point of category E,
+    //   C > E  (smaller plant under larger) → minDist = thisStemR + P.StemRadius
+    //   C ≤ E  (same tier or placing large near small) → minDist = thisHalfSp + P.HalfSpacing
+    //
+    // StemRadius values mirror the SpearRadius settings (plant body half-width).
 
-    struct FPlacedPoint { FVector2D Pos; float HalfSpacing; };
+    struct FPlacedPoint
+    {
+        FVector2D        Pos;
+        float            HalfSpacing;
+        float            StemRadius;
+        EFoliageCategory Category;
+    };
     TMap<TPair<int32,int32>, TArray<FPlacedPoint>> SpatialHash;
 
     float MaxSpacingAllTypes = 10.f;
     for (const TSharedPtr<FFoliageEntry>& E : Enabled)
         MaxSpacingAllTypes = FMath::Max(MaxSpacingAllTypes, FMath::Max(E->OverrideSpacing, 10.f));
-    const float BucketSize = MaxSpacingAllTypes;  // 3×3 neighbourhood covers max conflict radius
+    const float BucketSize = MaxSpacingAllTypes;
 
     auto HashKey = [&](float X, float Y) -> TPair<int32,int32>
     {
         return { FMath::FloorToInt(X / BucketSize), FMath::FloorToInt(Y / BucketSize) };
     };
 
-    // Returns true if (X,Y) is too close to any already-placed instance of any type.
-    auto IsTooCloseToAny = [&](float X, float Y, float ThisHalfSpacing) -> bool
+    // Returns the trunk/stem radius for a category (reuses the SpearRadius UI values).
+    auto StemRadiusFor = [&](EFoliageCategory Cat) -> float
+    {
+        switch (Cat)
+        {
+            case EFoliageCategory::LargeTree:  return SpearRadiusLarge;
+            case EFoliageCategory::MediumTree: return SpearRadiusMedium;
+            case EFoliageCategory::SmallTree:  return SpearRadiusSmall;
+            case EFoliageCategory::Shrub:      return SpearRadiusShrub;
+            default:                           return SpearRadiusFlower;
+        }
+    };
+
+    auto IsTooCloseToAny = [&](float X, float Y,
+                                float ThisHalfSp, float ThisStemR,
+                                EFoliageCategory ThisCat) -> bool
     {
         const int32 BX = FMath::FloorToInt(X / BucketSize);
         const int32 BY = FMath::FloorToInt(Y / BucketSize);
@@ -2031,7 +2063,14 @@ void SFoliageGeneratorWidget::RunGenerate()
             {
                 for (const FPlacedPoint& P : *Bucket)
                 {
-                    const float MinDist = ThisHalfSpacing + P.HalfSpacing;
+                    // Smaller plant near larger → stem clearance only (under-canopy ok)
+                    // Same or larger plant near existing → full design spacing
+                    const bool bSmallerNearLarger =
+                        static_cast<int32>(ThisCat) > static_cast<int32>(P.Category);
+                    const float MinDist = bSmallerNearLarger
+                        ? (ThisStemR + P.StemRadius)
+                        : (ThisHalfSp + P.HalfSpacing);
+
                     if (FVector2D::DistSquared(FVector2D(X, Y), P.Pos) < MinDist * MinDist)
                         return true;
                 }
@@ -2040,9 +2079,11 @@ void SFoliageGeneratorWidget::RunGenerate()
         return false;
     };
 
-    auto RegisterPlacedPoint = [&](float X, float Y, float HalfSpacing)
+    auto RegisterPlacedPoint = [&](float X, float Y,
+                                   float HalfSp, float StemR,
+                                   EFoliageCategory Cat)
     {
-        SpatialHash.FindOrAdd(HashKey(X, Y)).Add({ FVector2D(X, Y), HalfSpacing });
+        SpatialHash.FindOrAdd(HashKey(X, Y)).Add({ FVector2D(X, Y), HalfSp, StemR, Cat });
     };
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -2254,7 +2295,13 @@ void SFoliageGeneratorWidget::RunGenerate()
                         }
 
                         // ── Canopy check ───────────────────────────────────────
-                        if (bCanopyCheck)
+                        // Shrubs and flowers are understory plants — they grow
+                        // under tree canopies by design, so skip this check for
+                        // those categories.  Only trees need clear sky overhead.
+                        const bool bIsUnderstory =
+                            Entry->Category == EFoliageCategory::Shrub ||
+                            Entry->Category == EFoliageCategory::Flower;
+                        if (bCanopyCheck && !bIsUnderstory)
                         {
                             FCollisionQueryParams CanopyQP(NAME_None, false);
                             CanopyQP.AddIgnoredActor(IFA);
@@ -2271,8 +2318,12 @@ void SFoliageGeneratorWidget::RunGenerate()
                         }
 
                         // ── Cross-foliage spacing ──────────────────────────────
-                        const float HalfSp = Spacing * 0.5f;
-                        if (IsTooCloseToAny(Pos.X, Pos.Y, HalfSp))
+                        // Smaller plants (shrubs, flowers) use stem clearance
+                        // against already-placed larger plants, allowing them to
+                        // grow under canopies.  Same-tier plants use full spacing.
+                        const float HalfSp   = Spacing * 0.5f;
+                        const float StemR    = StemRadiusFor(Entry->Category);
+                        if (IsTooCloseToAny(Pos.X, Pos.Y, HalfSp, StemR, Entry->Category))
                         { ++DbgHashReject; continue; }
 
                         // ── Build instance ─────────────────────────────────────
@@ -2295,7 +2346,7 @@ void SFoliageGeneratorWidget::RunGenerate()
                         const float Scale = Rng.FRandRange(ScaleMin, ScaleMax);
                         Inst.DrawScale3D  = FVector3f(Scale, Scale, Scale);
 
-                        RegisterPlacedPoint(Pos.X, Pos.Y, HalfSp);
+                        RegisterPlacedPoint(Pos.X, Pos.Y, HalfSp, StemR, Entry->Category);
                         Instances.Add(MoveTemp(Inst));
                     }
                 }
