@@ -21,6 +21,9 @@
 // ── Debug visualization ───────────────────────────────────────────────────────
 #include "DrawDebugHelpers.h"
 
+// ── Collision ─────────────────────────────────────────────────────────────────
+#include "CollisionQueryParams.h"  // FOverlapResult (full definition)
+
 // ── Engine / Editor ───────────────────────────────────────────────────────────
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
 #include "Engine/StaticMeshActor.h"
