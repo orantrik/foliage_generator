@@ -184,6 +184,13 @@ private:
     float SpearRadiusShrub  =  35.f;
     float SpearRadiusFlower =  15.f;
 
+    // Per-category canopy radius for building-detection capsule (cm).
+    // The capsule wraps the FULL plant volume (trunk + leaves + canopy spread).
+    // Shrubs/Flowers skip building detection entirely, so no field needed.
+    float CanopyRadiusLarge  = 300.f;
+    float CanopyRadiusMedium = 200.f;
+    float CanopyRadiusSmall  = 120.f;
+
     // Minimum actor Z half-extent (cm) to be considered a building.
     // Hit actors shorter than this are treated as flat ground meshes
     // (roads, sidewalks, kerbs) and do NOT block placement.

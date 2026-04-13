@@ -1131,6 +1131,62 @@ TSharedRef<SWidget> SFoliageGeneratorWidget::BuildSettingsSection()
             ]
         ]
 
+        // ── Canopy Radius row ──────────────────────────────────────────────────
+        + SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 4.f, 0.f, 0.f))
+        [
+            SNew(SHorizontalBox)
+
+            + SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+                .Padding(FMargin(0.f, 0.f, 6.f, 0.f))
+            [
+                SNew(STextBlock)
+                .Text(LOCTEXT("CanopyRadHdr","Canopy Radius (cm):"))
+                .ToolTipText(LOCTEXT("CanopyRadHdrTip",
+                    "Full canopy spread (trunk + leaves) per tree category.\n"
+                    "Sizes the building-detection capsule when 'Detect Buildings' is on.\n"
+                    "Clearance is added on top of this value."))
+            ]
+
+            // Large
+            + SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+                .Padding(FMargin(0.f, 0.f, 2.f, 0.f))
+            [ SNew(STextBlock).Text(LOCTEXT("CanopyRL","Large")).TextStyle(FG_STYLE,"SmallText") ]
+            + SHorizontalBox::Slot().MaxWidth(65.f).Padding(FMargin(0.f, 0.f, 8.f, 0.f))
+            [
+                SNew(SSpinBox<float>)
+                .Value_Lambda([this](){ return CanopyRadiusLarge; })
+                .MinValue(10.f).MaxValue(5000.f).Delta(10.f)
+                .OnValueChanged_Lambda([this](float V){ CanopyRadiusLarge = V; })
+                .ToolTipText(LOCTEXT("CanopyRLTip","Canopy capsule radius for Large Trees (cm)."))
+            ]
+
+            // Medium
+            + SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+                .Padding(FMargin(0.f, 0.f, 2.f, 0.f))
+            [ SNew(STextBlock).Text(LOCTEXT("CanopyRM","Med")).TextStyle(FG_STYLE,"SmallText") ]
+            + SHorizontalBox::Slot().MaxWidth(65.f).Padding(FMargin(0.f, 0.f, 8.f, 0.f))
+            [
+                SNew(SSpinBox<float>)
+                .Value_Lambda([this](){ return CanopyRadiusMedium; })
+                .MinValue(10.f).MaxValue(5000.f).Delta(10.f)
+                .OnValueChanged_Lambda([this](float V){ CanopyRadiusMedium = V; })
+                .ToolTipText(LOCTEXT("CanopyRMTip","Canopy capsule radius for Medium Trees (cm)."))
+            ]
+
+            // Small
+            + SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+                .Padding(FMargin(0.f, 0.f, 2.f, 0.f))
+            [ SNew(STextBlock).Text(LOCTEXT("CanopyRS","Small")).TextStyle(FG_STYLE,"SmallText") ]
+            + SHorizontalBox::Slot().MaxWidth(65.f)
+            [
+                SNew(SSpinBox<float>)
+                .Value_Lambda([this](){ return CanopyRadiusSmall; })
+                .MinValue(10.f).MaxValue(3000.f).Delta(10.f)
+                .OnValueChanged_Lambda([this](float V){ CanopyRadiusSmall = V; })
+                .ToolTipText(LOCTEXT("CanopyRSTip","Canopy capsule radius for Small Trees (cm)."))
+            ]
+        ]
+
         // ── Patch-size filter row ───────────────────────────────────────────────
         + SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 4.f))
         [
@@ -2242,34 +2298,23 @@ void SFoliageGeneratorWidget::RunGenerate()
                         if (u + v > 1.f) { u = 1.f - u; v = 1.f - v; }
                         const FVector Pos = V0 + u * Edge1 + v * Edge2;
 
-                        // ── Spear collision ────────────────────────────────────
+                        // ── Building detection ─────────────────────────────────
+                        // Trees: full-canopy capsule overlap (covers trunk + leaves).
+                        // Shrubs/Flowers: narrow stem sphere sweep (original logic).
+                        // DbgCapsuleCenter/HalfH/R are set for trees and read below
+                        // to draw a short-lived debug capsule on accepted placements.
+                        FVector DbgCapsuleCenter = FVector::ZeroVector;
+                        float   DbgCapsuleHalfH  = 0.f;
+                        float   DbgCapsuleR      = 0.f;
+                        bool    bDbgDrawCapsule  = false;
+
                         if (bSpearCollision)
                         {
                             const FCategoryRules& R = GetRules(Entry->Category);
-                            float ActiveClearance = 0.f;
-                            switch (Entry->Category)
-                            {
-                                case EFoliageCategory::LargeTree:  ActiveClearance = ClearanceLargeTree;  break;
-                                case EFoliageCategory::MediumTree: ActiveClearance = ClearanceMediumTree; break;
-                                case EFoliageCategory::SmallTree:  ActiveClearance = ClearanceSmallTree;  break;
-                                case EFoliageCategory::Shrub:      ActiveClearance = ClearanceShrub;      break;
-                                case EFoliageCategory::Flower:     ActiveClearance = ClearanceFlower;     break;
-                                default:                           ActiveClearance = ClearanceShrub;      break;
-                            }
-                            float BaseSpearRadius = SpearRadiusShrub;
-                            switch (Entry->Category)
-                            {
-                                case EFoliageCategory::LargeTree:  BaseSpearRadius = SpearRadiusLarge;  break;
-                                case EFoliageCategory::MediumTree: BaseSpearRadius = SpearRadiusMedium; break;
-                                case EFoliageCategory::SmallTree:  BaseSpearRadius = SpearRadiusSmall;  break;
-                                case EFoliageCategory::Shrub:      BaseSpearRadius = SpearRadiusShrub;  break;
-                                case EFoliageCategory::Flower:     BaseSpearRadius = SpearRadiusFlower; break;
-                                default: break;
-                            }
-                            const float SpearRadius   = BaseSpearRadius + ActiveClearance;
-                            const float GroundSkip    = FMath::Clamp(R.SpearHalfHeight * 0.1f, 5.f, 100.f);
-                            const FVector SpearBottom = Pos + FVector(0.f, 0.f, GroundSkip);
-                            const FVector SpearTop    = Pos + FVector(0.f, 0.f, R.SpearHalfHeight * 2.f);
+                            const bool bIsTree =
+                                Entry->Category == EFoliageCategory::LargeTree  ||
+                                Entry->Category == EFoliageCategory::MediumTree ||
+                                Entry->Category == EFoliageCategory::SmallTree;
 
                             FCollisionQueryParams SpearQP(NAME_None, false);
                             for (AActor* Ignored : TargetActorSet) SpearQP.AddIgnoredActor(Ignored);
@@ -2277,20 +2322,81 @@ void SFoliageGeneratorWidget::RunGenerate()
                             for (const FScopedCollisionModifier::FSavedState& SC : CollisionGuard.Modifications)
                                 if (SC.SMC) SpearQP.AddIgnoredActor(SC.SMC->GetOwner());
 
-                            FHitResult SpearHit;
-                            if (World->SweepSingleByObjectType(
-                                    SpearHit, SpearBottom, SpearTop, FQuat::Identity,
-                                    FCollisionObjectQueryParams(ECollisionChannel::ECC_WorldStatic),
-                                    FCollisionShape::MakeSphere(SpearRadius), SpearQP))
+                            if (bIsTree)
                             {
-                                bool bIsBuilding = true;
-                                if (IsValid(SpearHit.GetActor()))
+                                // Resolve per-category canopy radius + clearance
+                                float BaseCanopyR     = CanopyRadiusSmall;
+                                float ActiveClearance = ClearanceSmallTree;
+                                switch (Entry->Category)
                                 {
-                                    FVector HO, HExt;
-                                    SpearHit.GetActor()->GetActorBounds(false, HO, HExt);
-                                    if (HExt.Z < SpearFlatThreshold) bIsBuilding = false;
+                                    case EFoliageCategory::LargeTree:
+                                        BaseCanopyR = CanopyRadiusLarge; ActiveClearance = ClearanceLargeTree; break;
+                                    case EFoliageCategory::MediumTree:
+                                        BaseCanopyR = CanopyRadiusMedium; ActiveClearance = ClearanceMediumTree; break;
+                                    default: break;
                                 }
-                                if (bIsBuilding) { ++DbgSpearReject; continue; }
+                                const float CanopyR      = BaseCanopyR + ActiveClearance;
+                                // CapsuleHalfH: half the cylindrical segment of the capsule.
+                                // Center is at SpearHalfHeight above ground.
+                                // The capsule top sphere reaches SpearHalfHeight + CanopyR,
+                                // so the half-height of the cylinder = SpearHalfHeight - CanopyR
+                                // (clamped to ≥ 1 so UE never gets a degenerate shape).
+                                const float CapsuleHalfH = FMath::Max(1.f, R.SpearHalfHeight - CanopyR);
+                                const FVector CapsuleCenter = Pos + FVector(0.f, 0.f, R.SpearHalfHeight);
+
+                                TArray<FOverlapResult> Overlaps;
+                                bool bBlocked = false;
+                                if (World->OverlapMultiByObjectType(
+                                        Overlaps, CapsuleCenter, FQuat::Identity,
+                                        FCollisionObjectQueryParams(ECollisionChannel::ECC_WorldStatic),
+                                        FCollisionShape::MakeCapsule(CanopyR, CapsuleHalfH), SpearQP))
+                                {
+                                    for (const FOverlapResult& O : Overlaps)
+                                    {
+                                        if (!IsValid(O.GetActor())) continue;
+                                        FVector HO, HExt;
+                                        O.GetActor()->GetActorBounds(false, HO, HExt);
+                                        if (HExt.Z >= SpearFlatThreshold) { bBlocked = true; break; }
+                                    }
+                                }
+                                if (bBlocked) { ++DbgSpearReject; continue; }
+
+                                // Stash capsule geometry for debug draw on acceptance
+                                DbgCapsuleCenter = CapsuleCenter;
+                                DbgCapsuleHalfH  = CapsuleHalfH;
+                                DbgCapsuleR      = CanopyR;
+                                bDbgDrawCapsule  = true;
+                            }
+                            else
+                            {
+                                // Shrubs / Flowers — narrow stem sphere sweep
+                                float ActiveClearance = ClearanceShrub;
+                                float BaseSpearRadius = SpearRadiusShrub;
+                                if (Entry->Category == EFoliageCategory::Flower)
+                                {
+                                    ActiveClearance = ClearanceFlower;
+                                    BaseSpearRadius = SpearRadiusFlower;
+                                }
+                                const float SpearRadius   = BaseSpearRadius + ActiveClearance;
+                                const float GroundSkip    = FMath::Clamp(R.SpearHalfHeight * 0.1f, 5.f, 100.f);
+                                const FVector SpearBottom = Pos + FVector(0.f, 0.f, GroundSkip);
+                                const FVector SpearTop    = Pos + FVector(0.f, 0.f, R.SpearHalfHeight * 2.f);
+
+                                FHitResult SpearHit;
+                                if (World->SweepSingleByObjectType(
+                                        SpearHit, SpearBottom, SpearTop, FQuat::Identity,
+                                        FCollisionObjectQueryParams(ECollisionChannel::ECC_WorldStatic),
+                                        FCollisionShape::MakeSphere(SpearRadius), SpearQP))
+                                {
+                                    bool bIsBuilding = true;
+                                    if (IsValid(SpearHit.GetActor()))
+                                    {
+                                        FVector HO, HExt;
+                                        SpearHit.GetActor()->GetActorBounds(false, HO, HExt);
+                                        if (HExt.Z < SpearFlatThreshold) bIsBuilding = false;
+                                    }
+                                    if (bIsBuilding) { ++DbgSpearReject; continue; }
+                                }
                             }
                         }
 
@@ -2348,6 +2454,21 @@ void SFoliageGeneratorWidget::RunGenerate()
 
                         RegisterPlacedPoint(Pos.X, Pos.Y, HalfSp, StemR, Entry->Category);
                         Instances.Add(MoveTemp(Inst));
+
+                        // Draw the building-detection capsule for a few seconds
+                        // so the user can see the volume that was checked.
+                        if (bDbgDrawCapsule)
+                        {
+                            DrawDebugCapsule(
+                                World,
+                                DbgCapsuleCenter,
+                                DbgCapsuleHalfH,
+                                DbgCapsuleR,
+                                FQuat::Identity,
+                                FColor::Cyan,
+                                /*bPersistentLines=*/false,
+                                /*LifeTime=*/3.f);
+                        }
                     }
                 }
             }
