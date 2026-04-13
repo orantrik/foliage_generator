@@ -22,7 +22,7 @@
 #include "DrawDebugHelpers.h"
 
 // ── Collision ─────────────────────────────────────────────────────────────────
-#include "CollisionQueryParams.h"  // FOverlapResult (full definition)
+#include "Engine/OverlapResult.h"  // FOverlapResult full struct definition
 
 // ── Engine / Editor ───────────────────────────────────────────────────────────
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
