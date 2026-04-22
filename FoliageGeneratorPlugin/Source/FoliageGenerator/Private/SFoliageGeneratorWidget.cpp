@@ -389,6 +389,12 @@ void SFoliageGeneratorWidget::Construct(const FArguments& InArgs)
 
                     + SVerticalBox::Slot().AutoHeight()
                     [ BuildSettingsSection() ]
+
+                    // Keep-out lives outside BuildSettingsSection because that
+                    // helper is reused by the Selected tab; building the list
+                    // view twice would orphan one and stomp on KeepOutListView.
+                    + SVerticalBox::Slot().AutoHeight()
+                    [ BuildKeepOutSection() ]
                 ]
             ]
 
@@ -1190,6 +1196,134 @@ TSharedRef<SWidget> SFoliageGeneratorWidget::BuildSettingsSection()
             ]
         ]
 
+        // ── Slope-Block row (per-category avoidance range, degrees) ─────────────
+        // If Max > Min, any triangle whose slope falls in [Min, Max] degrees is
+        // skipped for that category.  Default [0,0] = inert.  Examples:
+        //   Large Trees [25, 90]  → keeps big trees off steep hillsides
+        //   Flowers     [0, 5]    → keeps flowers off perfectly flat surfaces
+        + SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 4.f, 0.f, 0.f))
+        [
+            SNew(SHorizontalBox)
+
+            + SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+                .Padding(FMargin(0.f, 0.f, 6.f, 0.f))
+            [
+                SNew(STextBlock)
+                .Text(LOCTEXT("SlopeBlockHdr","Slope-Block (°):"))
+                .ToolTipText(LOCTEXT("SlopeBlockHdrTip",
+                    "Per-category slope avoidance range (degrees from horizontal).\n"
+                    "0° = perfectly flat, 90° = vertical wall.\n"
+                    "If Max > Min, triangles whose slope falls in [Min, Max] are skipped\n"
+                    "for that category.  Default [0, 0] = feature inert for that category.\n"
+                    "Example: Large Trees [25, 90] keeps big trees off steep hillsides."))
+            ]
+
+            // Large
+            + SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+                .Padding(FMargin(0.f, 0.f, 2.f, 0.f))
+            [ SNew(STextBlock).Text(LOCTEXT("SlopeL","Lg")).TextStyle(FG_STYLE,"SmallText") ]
+            + SHorizontalBox::Slot().MaxWidth(45.f).Padding(FMargin(0.f, 0.f, 1.f, 0.f))
+            [
+                SNew(SSpinBox<float>)
+                .Value_Lambda([this](){ return SlopeBlockMinLarge; })
+                .MinValue(0.f).MaxValue(90.f).Delta(1.f)
+                .OnValueChanged_Lambda([this](float V){ SlopeBlockMinLarge = V; })
+                .ToolTipText(LOCTEXT("SlopeLMinTip","Large Tree slope-block MIN (°)."))
+            ]
+            + SHorizontalBox::Slot().MaxWidth(45.f).Padding(FMargin(0.f, 0.f, 8.f, 0.f))
+            [
+                SNew(SSpinBox<float>)
+                .Value_Lambda([this](){ return SlopeBlockMaxLarge; })
+                .MinValue(0.f).MaxValue(90.f).Delta(1.f)
+                .OnValueChanged_Lambda([this](float V){ SlopeBlockMaxLarge = V; })
+                .ToolTipText(LOCTEXT("SlopeLMaxTip","Large Tree slope-block MAX (°)."))
+            ]
+
+            // Medium
+            + SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+                .Padding(FMargin(0.f, 0.f, 2.f, 0.f))
+            [ SNew(STextBlock).Text(LOCTEXT("SlopeM","Md")).TextStyle(FG_STYLE,"SmallText") ]
+            + SHorizontalBox::Slot().MaxWidth(45.f).Padding(FMargin(0.f, 0.f, 1.f, 0.f))
+            [
+                SNew(SSpinBox<float>)
+                .Value_Lambda([this](){ return SlopeBlockMinMedium; })
+                .MinValue(0.f).MaxValue(90.f).Delta(1.f)
+                .OnValueChanged_Lambda([this](float V){ SlopeBlockMinMedium = V; })
+                .ToolTipText(LOCTEXT("SlopeMMinTip","Medium Tree slope-block MIN (°)."))
+            ]
+            + SHorizontalBox::Slot().MaxWidth(45.f).Padding(FMargin(0.f, 0.f, 8.f, 0.f))
+            [
+                SNew(SSpinBox<float>)
+                .Value_Lambda([this](){ return SlopeBlockMaxMedium; })
+                .MinValue(0.f).MaxValue(90.f).Delta(1.f)
+                .OnValueChanged_Lambda([this](float V){ SlopeBlockMaxMedium = V; })
+                .ToolTipText(LOCTEXT("SlopeMMaxTip","Medium Tree slope-block MAX (°)."))
+            ]
+
+            // Small
+            + SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+                .Padding(FMargin(0.f, 0.f, 2.f, 0.f))
+            [ SNew(STextBlock).Text(LOCTEXT("SlopeS","Sm")).TextStyle(FG_STYLE,"SmallText") ]
+            + SHorizontalBox::Slot().MaxWidth(45.f).Padding(FMargin(0.f, 0.f, 1.f, 0.f))
+            [
+                SNew(SSpinBox<float>)
+                .Value_Lambda([this](){ return SlopeBlockMinSmall; })
+                .MinValue(0.f).MaxValue(90.f).Delta(1.f)
+                .OnValueChanged_Lambda([this](float V){ SlopeBlockMinSmall = V; })
+                .ToolTipText(LOCTEXT("SlopeSMinTip","Small Tree slope-block MIN (°)."))
+            ]
+            + SHorizontalBox::Slot().MaxWidth(45.f).Padding(FMargin(0.f, 0.f, 8.f, 0.f))
+            [
+                SNew(SSpinBox<float>)
+                .Value_Lambda([this](){ return SlopeBlockMaxSmall; })
+                .MinValue(0.f).MaxValue(90.f).Delta(1.f)
+                .OnValueChanged_Lambda([this](float V){ SlopeBlockMaxSmall = V; })
+                .ToolTipText(LOCTEXT("SlopeSMaxTip","Small Tree slope-block MAX (°)."))
+            ]
+
+            // Shrub
+            + SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+                .Padding(FMargin(0.f, 0.f, 2.f, 0.f))
+            [ SNew(STextBlock).Text(LOCTEXT("SlopeSh","Sh")).TextStyle(FG_STYLE,"SmallText") ]
+            + SHorizontalBox::Slot().MaxWidth(45.f).Padding(FMargin(0.f, 0.f, 1.f, 0.f))
+            [
+                SNew(SSpinBox<float>)
+                .Value_Lambda([this](){ return SlopeBlockMinShrub; })
+                .MinValue(0.f).MaxValue(90.f).Delta(1.f)
+                .OnValueChanged_Lambda([this](float V){ SlopeBlockMinShrub = V; })
+                .ToolTipText(LOCTEXT("SlopeShMinTip","Shrub slope-block MIN (°)."))
+            ]
+            + SHorizontalBox::Slot().MaxWidth(45.f).Padding(FMargin(0.f, 0.f, 8.f, 0.f))
+            [
+                SNew(SSpinBox<float>)
+                .Value_Lambda([this](){ return SlopeBlockMaxShrub; })
+                .MinValue(0.f).MaxValue(90.f).Delta(1.f)
+                .OnValueChanged_Lambda([this](float V){ SlopeBlockMaxShrub = V; })
+                .ToolTipText(LOCTEXT("SlopeShMaxTip","Shrub slope-block MAX (°)."))
+            ]
+
+            // Flower
+            + SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+                .Padding(FMargin(0.f, 0.f, 2.f, 0.f))
+            [ SNew(STextBlock).Text(LOCTEXT("SlopeFl","Fl")).TextStyle(FG_STYLE,"SmallText") ]
+            + SHorizontalBox::Slot().MaxWidth(45.f).Padding(FMargin(0.f, 0.f, 1.f, 0.f))
+            [
+                SNew(SSpinBox<float>)
+                .Value_Lambda([this](){ return SlopeBlockMinFlower; })
+                .MinValue(0.f).MaxValue(90.f).Delta(1.f)
+                .OnValueChanged_Lambda([this](float V){ SlopeBlockMinFlower = V; })
+                .ToolTipText(LOCTEXT("SlopeFlMinTip","Flower slope-block MIN (°)."))
+            ]
+            + SHorizontalBox::Slot().MaxWidth(45.f)
+            [
+                SNew(SSpinBox<float>)
+                .Value_Lambda([this](){ return SlopeBlockMaxFlower; })
+                .MinValue(0.f).MaxValue(90.f).Delta(1.f)
+                .OnValueChanged_Lambda([this](float V){ SlopeBlockMaxFlower = V; })
+                .ToolTipText(LOCTEXT("SlopeFlMaxTip","Flower slope-block MAX (°)."))
+            ]
+        ]
+
         // ── Patch-size filter row ───────────────────────────────────────────────
         + SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 4.f))
         [
@@ -1265,6 +1399,110 @@ TSharedRef<SWidget> SFoliageGeneratorWidget::BuildSettingsSection()
             + SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
                 .Padding(FMargin(0.f, 0.f, 4.f, 0.f))
             [ SNew(STextBlock).Text(LOCTEXT("CmC"," cm  (below → Shrubs only)")).TextStyle(FG_STYLE,"SmallText") ]
+        ];
+}
+
+// ─── Keep-Out section ────────────────────────────────────────────────────────
+// Built ONCE (not via BuildSettingsSection, which is called in both tabs and
+// would otherwise create duplicate list views and stomp on KeepOutListView).
+// Mark meshes in the level that foliage must stay away from.  Each marked
+// actor's world AABB is expanded by Buffer (cm); candidate points inside the
+// expanded box are rejected.  Cheap O(N actors) per candidate so it scales.
+
+TSharedRef<SWidget> SFoliageGeneratorWidget::BuildKeepOutSection()
+{
+    return SNew(SVerticalBox)
+
+        // ── Header / controls row ─────────────────────────────────────────────
+        + SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 6.f, 0.f, 2.f))
+        [
+            SNew(SHorizontalBox)
+
+            + SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+                .Padding(FMargin(0.f, 0.f, 4.f, 0.f))
+            [
+                SNew(SCheckBox)
+                .IsChecked_Lambda([this]()
+                {
+                    return bKeepOutEnabled ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+                })
+                .OnCheckStateChanged_Lambda([this](ECheckBoxState S)
+                {
+                    bKeepOutEnabled = (S == ECheckBoxState::Checked);
+                })
+                .ToolTipText(LOCTEXT("KOEnableTip",
+                    "When enabled, foliage avoids the actors listed below.\n"
+                    "Each actor's world AABB is expanded by Buffer (cm).\n"
+                    "Candidate points inside the expanded AABB are rejected."))
+            ]
+
+            + SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+                .Padding(FMargin(0.f, 0.f, 8.f, 0.f))
+            [ SNew(STextBlock).Text(LOCTEXT("KOLabel","Keep-Out Actors")) ]
+
+            + SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+                .Padding(FMargin(0.f, 0.f, 2.f, 0.f))
+            [ SNew(STextBlock).Text(LOCTEXT("KOBufLabel","Buffer:")).TextStyle(FG_STYLE,"SmallText") ]
+            + SHorizontalBox::Slot().MaxWidth(80.f).Padding(FMargin(0.f, 0.f, 2.f, 0.f))
+            [
+                SNew(SSpinBox<float>)
+                .Value_Lambda([this](){ return KeepOutBufferRadius; })
+                .MinValue(0.f).MaxValue(10000.f).Delta(10.f)
+                .OnValueChanged_Lambda([this](float V){ KeepOutBufferRadius = V; })
+                .ToolTipText(LOCTEXT("KOBufTip",
+                    "Distance (cm) added to each keep-out actor's AABB before rejection."))
+            ]
+            + SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+                .Padding(FMargin(0.f, 0.f, 8.f, 0.f))
+            [ SNew(STextBlock).Text(LOCTEXT("KOcm"," cm")).TextStyle(FG_STYLE,"SmallText") ]
+
+            // Add Selected → push current viewport selection into the list
+            + SHorizontalBox::Slot().AutoWidth().Padding(FMargin(0.f, 0.f, 2.f, 0.f))
+            [
+                SNew(SButton)
+                .Text(LOCTEXT("KOAdd","Add Selected"))
+                .ToolTipText(LOCTEXT("KOAddTip",
+                    "Add all currently selected viewport actors to the keep-out list."))
+                .OnClicked(this, &SFoliageGeneratorWidget::OnAddSelectedKeepOut)
+            ]
+
+            // Visualize → flash each AABB in the viewport for 3s
+            + SHorizontalBox::Slot().AutoWidth().Padding(FMargin(0.f, 0.f, 2.f, 0.f))
+            [
+                SNew(SButton)
+                .Text(LOCTEXT("KOViz","Visualize"))
+                .ToolTipText(LOCTEXT("KOVizTip",
+                    "Briefly draw each keep-out AABB (with buffer expansion) in the viewport."))
+                .OnClicked(this, &SFoliageGeneratorWidget::OnVisualizeKeepOut)
+            ]
+
+            // Clear → empty the list
+            + SHorizontalBox::Slot().AutoWidth()
+            [
+                SNew(SButton)
+                .Text(LOCTEXT("KOClear","Clear"))
+                .ToolTipText(LOCTEXT("KOClearTip","Remove all actors from the keep-out list."))
+                .OnClicked(this, &SFoliageGeneratorWidget::OnClearKeepOut)
+            ]
+        ]
+
+        // ── Keep-Out list view ────────────────────────────────────────────────
+        // Fixed-height bordered scrollable list so it doesn't dominate layout
+        // when many actors are added.  Each row shows the actor's label + an
+        // X button to remove that single entry.
+        + SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 2.f, 0.f, 0.f))
+        [
+            SNew(SBox).HeightOverride(80.f)
+            [
+                SNew(SBorder)
+                .BorderImage(FG_STYLE.GetBrush("Menu.Background"))
+                [
+                    SAssignNew(KeepOutListView, SListView<TWeakObjectPtr<AActor>>)
+                    .ListItemsSource(&KeepOutActors)
+                    .OnGenerateRow(this, &SFoliageGeneratorWidget::GenerateKeepOutRow)
+                    .SelectionMode(ESelectionMode::None)
+                ]
+            ]
         ];
 }
 
@@ -1604,6 +1842,112 @@ FReply SFoliageGeneratorWidget::OnClearClicked()
 {
     RunClear();
     return FReply::Handled();
+}
+
+// ─── Keep-Out handlers ───────────────────────────────────────────────────────
+// All handlers refresh the list view so additions/removals are reflected
+// immediately.  Stale (deleted-actor) WeakPtrs are pruned on every Add to keep
+// the visible list clean; the placement loop also tolerates them via .Get().
+
+FReply SFoliageGeneratorWidget::OnAddSelectedKeepOut()
+{
+    if (!GEditor) return FReply::Handled();
+
+    // Prune stale entries first so dedupe doesn't trip on dead pointers.
+    KeepOutActors.RemoveAll([](const TWeakObjectPtr<AActor>& W){ return !W.IsValid(); });
+
+    USelection* Sel = GEditor->GetSelectedActors();
+    int32 Added = 0;
+    for (int32 i = 0; i < Sel->Num(); ++i)
+    {
+        AActor* A = Cast<AActor>(Sel->GetSelectedObject(i));
+        if (!IsValid(A)) continue;
+
+        const bool bAlready = KeepOutActors.ContainsByPredicate(
+            [A](const TWeakObjectPtr<AActor>& W){ return W.Get() == A; });
+        if (bAlready) continue;
+
+        KeepOutActors.Emplace(A);
+        ++Added;
+    }
+
+    if (KeepOutListView.IsValid()) KeepOutListView->RequestListRefresh();
+    AppendLog(FString::Printf(
+        TEXT("Keep-Out: added %d actor(s) — list now %d entry(ies)."),
+        Added, KeepOutActors.Num()));
+    return FReply::Handled();
+}
+
+FReply SFoliageGeneratorWidget::OnClearKeepOut()
+{
+    const int32 Prev = KeepOutActors.Num();
+    KeepOutActors.Reset();
+    if (KeepOutListView.IsValid()) KeepOutListView->RequestListRefresh();
+    AppendLog(FString::Printf(TEXT("Keep-Out: cleared %d entry(ies)."), Prev));
+    return FReply::Handled();
+}
+
+FReply SFoliageGeneratorWidget::OnVisualizeKeepOut()
+{
+    UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+    if (!World) { AppendLog(TEXT("Keep-Out Visualize: no editor world.")); return FReply::Handled(); }
+
+    const float Buf = FMath::Max(0.f, KeepOutBufferRadius);
+    int32 Drawn = 0;
+    for (const TWeakObjectPtr<AActor>& WA : KeepOutActors)
+    {
+        AActor* A = WA.Get();
+        if (!IsValid(A)) continue;
+        FVector Origin, Extent;
+        A->GetActorBounds(false, Origin, Extent);
+        if (Extent.IsNearlyZero()) continue;
+        const FVector ExpExtent = Extent + FVector(Buf, Buf, Buf);
+        DrawDebugBox(World, Origin, ExpExtent, FColor::Red,
+                     /*bPersistentLines=*/false, /*LifeTime=*/3.f);
+        ++Drawn;
+    }
+    AppendLog(FString::Printf(
+        TEXT("Keep-Out Visualize: drew %d AABB(s) (buffer %.0f cm) for 3 s."),
+        Drawn, Buf));
+    return FReply::Handled();
+}
+
+FReply SFoliageGeneratorWidget::OnRemoveKeepOutRow(TWeakObjectPtr<AActor> Actor)
+{
+    KeepOutActors.RemoveAll(
+        [&Actor](const TWeakObjectPtr<AActor>& W)
+        { return W.Get() == Actor.Get() || !W.IsValid(); });
+    if (KeepOutListView.IsValid()) KeepOutListView->RequestListRefresh();
+    return FReply::Handled();
+}
+
+TSharedRef<ITableRow> SFoliageGeneratorWidget::GenerateKeepOutRow(
+    TWeakObjectPtr<AActor>            Actor,
+    const TSharedRef<STableViewBase>& OwnerTable)
+{
+    AActor* A = Actor.Get();
+    const FString Label = IsValid(A)
+        ? A->GetActorLabel()
+        : FString(TEXT("(deleted)"));
+
+    return SNew(STableRow<TWeakObjectPtr<AActor>>, OwnerTable)
+        .Padding(FMargin(2.f))
+        [
+            SNew(SHorizontalBox)
+
+            + SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)
+            [
+                SNew(STextBlock).Text(FText::FromString(Label))
+            ]
+
+            + SHorizontalBox::Slot().AutoWidth()
+            [
+                SNew(SButton)
+                .Text(LOCTEXT("KOXBtn","X"))
+                .ToolTipText(LOCTEXT("KORmTip","Remove this actor from the keep-out list."))
+                .OnClicked(this, &SFoliageGeneratorWidget::OnRemoveKeepOutRow, Actor)
+            ]
+        ];
 }
 
 // ─── OnDebugPointsClicked ────────────────────────────────────────────────────
@@ -2146,6 +2490,28 @@ void SFoliageGeneratorWidget::RunGenerate()
     };
     // ─────────────────────────────────────────────────────────────────────────
 
+    // ── Keep-out AABB cache ──────────────────────────────────────────────────
+    // Expand each marked actor's world-space AABB by KeepOutBufferRadius (cm)
+    // so a cheap squared-distance test rejects candidates near these meshes.
+    // Caching here means we compute each box once and reuse across all foliage
+    // types.  Stale WeakPtr entries (deleted actors) are silently skipped.
+    TArray<FBox> KeepOutBoxes;
+    if (bKeepOutEnabled && KeepOutActors.Num() > 0)
+    {
+        const float Buf = FMath::Max(0.f, KeepOutBufferRadius);
+        KeepOutBoxes.Reserve(KeepOutActors.Num());
+        for (const TWeakObjectPtr<AActor>& WA : KeepOutActors)
+        {
+            AActor* A = WA.Get();
+            if (!IsValid(A)) continue;
+            FVector Origin, Extent;
+            A->GetActorBounds(false, Origin, Extent);
+            if (Extent.IsNearlyZero()) continue;
+            const FVector ExpExtent = Extent + FVector(Buf, Buf, Buf);
+            KeepOutBoxes.Emplace(Origin - ExpExtent, Origin + ExpExtent);
+        }
+    }
+
     for (const TSharedPtr<FFoliageEntry>& Entry : Enabled)
     {
         if (bUserCancelled) break;
@@ -2169,6 +2535,25 @@ void SFoliageGeneratorWidget::RunGenerate()
         const float ScaleMin = FMath::Max(Entry->OverrideScaleMin, 0.1f);
         const float ScaleMax = FMath::Max(Entry->OverrideScaleMax, ScaleMin);
 
+        // ── Per-category slope-block range ────────────────────────────────
+        // If SlopeBlockMax > SlopeBlockMin, triangles whose slope angle
+        // falls inside [Min, Max] degrees are rejected for this category.
+        float SlopeBlockMin = 0.f, SlopeBlockMax = 0.f;
+        switch (Entry->Category)
+        {
+            case EFoliageCategory::LargeTree:
+                SlopeBlockMin = SlopeBlockMinLarge;  SlopeBlockMax = SlopeBlockMaxLarge;  break;
+            case EFoliageCategory::MediumTree:
+                SlopeBlockMin = SlopeBlockMinMedium; SlopeBlockMax = SlopeBlockMaxMedium; break;
+            case EFoliageCategory::SmallTree:
+                SlopeBlockMin = SlopeBlockMinSmall;  SlopeBlockMax = SlopeBlockMaxSmall;  break;
+            case EFoliageCategory::Shrub:
+                SlopeBlockMin = SlopeBlockMinShrub;  SlopeBlockMax = SlopeBlockMaxShrub;  break;
+            case EFoliageCategory::Flower:
+                SlopeBlockMin = SlopeBlockMinFlower; SlopeBlockMax = SlopeBlockMaxFlower; break;
+        }
+        const bool bSlopeBlockActive = (SlopeBlockMax > SlopeBlockMin);
+
         // Register in Foliage Mode palette
         FFoliageInfo* FoliageInfo = nullptr;
         IFA->AddFoliageType(FT, &FoliageInfo);
@@ -2182,6 +2567,7 @@ void SFoliageGeneratorWidget::RunGenerate()
         TArray<FFoliageInstance> Instances;
         bool  bCapReached = false;
         int32 DbgCandidates=0, DbgPatchReject=0, DbgSpearReject=0, DbgCanopyReject=0, DbgHashReject=0;
+        int32 DbgSlopeReject=0, DbgKeepOutReject=0;
 
         // ── Triangle-based placement (mirrors UE's built-in Fill tool) ────────
         //
@@ -2286,6 +2672,21 @@ void SFoliageGeneratorWidget::RunGenerate()
                     int32       Count = FMath::FloorToInt(ExpF);
                     if (Rng.FRandRange(0.f, 1.f) < FMath::Frac(ExpF)) ++Count;
                     if (Count <= 0) continue;
+
+                    // ── Slope-block gate ─────────────────────────────────────
+                    // TriNormal is already the upward-facing surface normal.
+                    // Angle from horizontal = acos(N.Z)  →  0° flat, 90° wall.
+                    // If the triangle falls inside the category's block range,
+                    // skip the whole triangle and credit the expected count to
+                    // the reject counter so the log reflects real rejections.
+                    if (bSlopeBlockActive)
+                    {
+                        const float SlopeDeg =
+                            FMath::RadiansToDegrees(FMath::Acos(
+                                FMath::Clamp(TriNormal.Z, 0.f, 1.f)));
+                        if (SlopeDeg >= SlopeBlockMin && SlopeDeg <= SlopeBlockMax)
+                        { DbgSlopeReject += Count; continue; }
+                    }
 
                     for (int32 k = 0; k < Count; ++k)
                     {
@@ -2426,6 +2827,21 @@ void SFoliageGeneratorWidget::RunGenerate()
                             { ++DbgCanopyReject; continue; }
                         }
 
+                        // ── Keep-out AABB gate ──────────────────────────────────
+                        // Reject if the candidate falls inside any marked actor's
+                        // AABB expanded by KeepOutBufferRadius.  FBox::IsInsideOrOn
+                        // returns true when Pos is inside or on the boundary, which
+                        // is exactly the "within buffer distance" semantic we want.
+                        if (KeepOutBoxes.Num() > 0)
+                        {
+                            bool bInKeepOut = false;
+                            for (const FBox& KB : KeepOutBoxes)
+                            {
+                                if (KB.IsInsideOrOn(Pos)) { bInKeepOut = true; break; }
+                            }
+                            if (bInKeepOut) { ++DbgKeepOutReject; continue; }
+                        }
+
                         // ── Cross-foliage spacing ──────────────────────────────
                         // Smaller plants (shrubs, flowers) use stem clearance
                         // against already-placed larger plants, allowing them to
@@ -2480,10 +2896,10 @@ void SFoliageGeneratorWidget::RunGenerate()
         if (Instances.IsEmpty())
         {
             AppendLog(FString::Printf(
-                TEXT("  %s: 0 placements (spacing %.0f cm) [sampled=%d patch=%d spear=%d canopy=%d hash=%d]"),
+                TEXT("  %s: 0 placements (spacing %.0f cm) [sampled=%d patch=%d slope=%d spear=%d canopy=%d keepout=%d hash=%d]"),
                 *Entry->AssetName, Spacing,
-                DbgCandidates, DbgPatchReject,
-                DbgSpearReject, DbgCanopyReject, DbgHashReject));
+                DbgCandidates, DbgPatchReject, DbgSlopeReject,
+                DbgSpearReject, DbgCanopyReject, DbgKeepOutReject, DbgHashReject));
             continue;
         }
 

@@ -2,6 +2,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "UObject/WeakObjectPtr.h"
 #include "Widgets/SCompoundWidget.h"
 #include "Widgets/Views/SListView.h"
 #include "Widgets/Input/SComboBox.h"
@@ -12,6 +13,7 @@
 class FAssetThumbnailPool;
 class FAssetThumbnail;
 class SWidgetSwitcher;
+class AActor;
 
 // ─── Data types ───────────────────────────────────────────────────────────────
 
@@ -99,6 +101,7 @@ private:
     TSharedRef<SWidget> BuildFoliageListSection();
     TSharedRef<SWidget> BuildSelectedTab();
     TSharedRef<SWidget> BuildSettingsSection();
+    TSharedRef<SWidget> BuildKeepOutSection();
     TSharedRef<SWidget> BuildButtonRow();
     TSharedRef<SWidget> BuildLogSection();
 
@@ -195,6 +198,35 @@ private:
     // Hit actors shorter than this are treated as flat ground meshes
     // (roads, sidewalks, kerbs) and do NOT block placement.
     float SpearFlatThreshold = 25.f;
+
+    // Per-category slope-avoidance range (degrees from horizontal).
+    // If SlopeMax > SlopeMin and the triangle's slope falls within
+    // [SlopeMin, SlopeMax], the candidate is rejected for that category.
+    // Default [0, 0] = feature inert. Example: Large Trees [25, 90]
+    // keeps big trees off steep hillsides.
+    float SlopeBlockMinLarge  = 0.f,  SlopeBlockMaxLarge  = 0.f;
+    float SlopeBlockMinMedium = 0.f,  SlopeBlockMaxMedium = 0.f;
+    float SlopeBlockMinSmall  = 0.f,  SlopeBlockMaxSmall  = 0.f;
+    float SlopeBlockMinShrub  = 0.f,  SlopeBlockMaxShrub  = 0.f;
+    float SlopeBlockMinFlower = 0.f,  SlopeBlockMaxFlower = 0.f;
+
+    // ── Keep-out actors ──────────────────────────────────────────────────────
+    // User-marked meshes that foliage should stay away from.  Placement is
+    // rejected when a candidate point is within KeepOutBufferRadius (cm) of
+    // any listed actor's world-space AABB.
+    bool  bKeepOutEnabled     = true;
+    float KeepOutBufferRadius = 100.f;
+    TArray<TWeakObjectPtr<AActor>> KeepOutActors;
+    TSharedPtr<SListView<TWeakObjectPtr<AActor>>> KeepOutListView;
+
+    // Handlers
+    FReply OnAddSelectedKeepOut();
+    FReply OnClearKeepOut();
+    FReply OnVisualizeKeepOut();
+    FReply OnRemoveKeepOutRow(TWeakObjectPtr<AActor> Actor);
+    TSharedRef<ITableRow> GenerateKeepOutRow(
+        TWeakObjectPtr<AActor>              Actor,
+        const TSharedRef<STableViewBase>&   OwnerTable);
 
     // Patch-size filtering
     bool  bPatchSizeFilter     = true;
